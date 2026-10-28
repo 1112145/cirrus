@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "cirrus-api",
   "main": "src/index.ts",
-  // giữ <= ngày mà workerd trong @cloudflare/vitest-plugin hỗ trợ, nếu không test sẽ không khởi động
+  // keep <= the date supported by workerd in @cloudflare/vitest-plugin, or tests won't start
   "compatibility_date": "2026-10-15",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
@@ -12,7 +12,7 @@
     "DEFAULT_LANGUAGE": "en-US"
   },
 
-  // database_id: thay bằng ID thật sau khi chạy `wrangler d1 create cirrus`
+  // database_id: replace with the real ID after running `wrangler d1 create cirrus`
   "d1_databases": [
     {
       "binding": "DB",
@@ -22,7 +22,7 @@
     }
   ]
 
-  // Thêm ở các milestone sau:
+  // Added in later milestones:
   // M1: kv_namespaces SCHEMA_CACHE (schema snapshot)
   // M5: r2_buckets STORAGE
   // M7: queues FLOWS, durable_objects REALTIME

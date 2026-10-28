@@ -9,14 +9,14 @@ describe('/server', () => {
     expect(await res.text()).toBe('pong');
   });
 
-  it('GET /server/info → project info bọc trong data', async () => {
+  it('GET /server/info → project info wrapped in data', async () => {
     const res = await call('/server/info');
     expect(res.status).toBe(200);
     const body = await res.json<{ data: { project: { project_name: string } } }>();
     expect(body.data.project.project_name).toBe('Cirrus');
   });
 
-  it('GET /server/health → ok khi D1 sống', async () => {
+  it('GET /server/health → ok when D1 is reachable', async () => {
     const res = await call('/server/health');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toContain('application/health+json');
@@ -25,7 +25,7 @@ describe('/server', () => {
 });
 
 describe('error format', () => {
-  it('route không tồn tại → ROUTE_NOT_FOUND kiểu Directus', async () => {
+  it('unknown route → Directus-style ROUTE_NOT_FOUND', async () => {
     const res = await call('/nope');
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({
@@ -48,7 +48,7 @@ describe('system tables', () => {
     'cirrus_users',
   ];
 
-  it('migration tạo đủ bảng', async () => {
+  it('migration creates every table', async () => {
     const { results } = await env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cirrus_%' ORDER BY name",
     ).all<{ name: string }>();
@@ -60,14 +60,14 @@ describe('system tables', () => {
     expect(row?.value).toBe('1');
   });
 
-  it('chặn collection trùng prefix cirrus_', async () => {
+  it('rejects collections using the cirrus_ prefix', async () => {
     await expect(env.DB.prepare("INSERT INTO cirrus_collections (collection) VALUES ('cirrus_hack')").run()).rejects.toThrow(
       /CHECK constraint failed/,
     );
     await env.DB.prepare("INSERT INTO cirrus_collections (collection) VALUES ('posts')").run();
   });
 
-  it('access không được gắn cả role lẫn user', async () => {
+  it('access cannot target both a role and a user', async () => {
     await env.DB.batch([
       env.DB.prepare("INSERT INTO cirrus_roles (id, name) VALUES ('r1', 'Editor')"),
       env.DB.prepare("INSERT INTO cirrus_users (id, email) VALUES ('u1', 'a@b.c')"),
@@ -76,11 +76,11 @@ describe('system tables', () => {
     await expect(
       env.DB.prepare("INSERT INTO cirrus_access (id, role, user, policy) VALUES ('a1', 'r1', 'u1', 'p1')").run(),
     ).rejects.toThrow(/CHECK constraint failed/);
-    // public policy: cả hai NULL
+    // public policy: both NULL
     await env.DB.prepare("INSERT INTO cirrus_access (id, policy) VALUES ('a2', 'p1')").run();
   });
 
-  it('email user không phân biệt hoa thường', async () => {
+  it('user emails are case-insensitive', async () => {
     await env.DB.prepare("INSERT INTO cirrus_users (id, email) VALUES ('u2', 'Khoa@Example.com')").run();
     await expect(env.DB.prepare("INSERT INTO cirrus_users (id, email) VALUES ('u3', 'khoa@example.com')").run()).rejects.toThrow(
       /UNIQUE constraint failed/,

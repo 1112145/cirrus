@@ -1,4 +1,4 @@
--- Cirrus system tables (spec §6). Prefix cirrus_ dành riêng cho hệ thống.
+-- Cirrus system tables (spec §6). The cirrus_ prefix is reserved for the system.
 
 CREATE TABLE cirrus_collections (
   collection   TEXT PRIMARY KEY,
@@ -40,7 +40,7 @@ CREATE TABLE cirrus_relations (
   UNIQUE (many_collection, many_field)
 );
 
--- Access control theo mô hình Directus 11: role → access → policy → permission
+-- Access control following the Directus 11 model: role → access → policy → permission
 CREATE TABLE cirrus_roles (
   id           TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
@@ -70,7 +70,7 @@ CREATE TABLE cirrus_users (
   created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
--- Gắn policy vào role HOẶC user; cả hai NULL = public policy
+-- Attach a policy to a role OR a user; both NULL = public policy
 CREATE TABLE cirrus_access (
   id      TEXT PRIMARY KEY,
   role    TEXT REFERENCES cirrus_roles(id) ON DELETE CASCADE,

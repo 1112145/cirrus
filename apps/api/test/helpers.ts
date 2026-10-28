@@ -2,10 +2,10 @@ import { exports } from 'cloudflare:workers';
 
 const BASE = 'http://cirrus.test';
 
-/** Gọi Worker đang test, không qua mạng. */
+/** Call the Worker under test without going over the network. */
 export const call = (path: string, init?: RequestInit) => exports.default.fetch(new Request(BASE + path, init));
 
-/** fetch giả để @directus/sdk gọi thẳng vào Worker. */
+/** fetch shim that lets @directus/sdk call the Worker directly. */
 export const workerFetch: typeof fetch = (input, init) => exports.default.fetch(new Request(input, init));
 
 export { BASE };

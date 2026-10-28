@@ -3,10 +3,10 @@ import type { AppEnv } from '../env.ts';
 
 export const server = new Hono<AppEnv>();
 
-// SDK: serverPing() — Directus trả text "pong"
+// SDK: serverPing() — Directus responds with the text "pong"
 server.get('/ping', (c) => c.text('pong'));
 
-// SDK: serverInfo() — phần public; khi có auth (M3) sẽ trả thêm thông tin cho admin
+// SDK: serverInfo() — public part; once auth lands (M3), admins get more fields
 server.get('/info', (c) =>
   c.json({
     data: {
@@ -24,7 +24,7 @@ server.get('/info', (c) =>
   }),
 );
 
-// SDK: serverHealth() — kiểm tra D1 sống
+// SDK: serverHealth() — checks that D1 is reachable
 server.get('/health', async (c) => {
   const started = Date.now();
   try {

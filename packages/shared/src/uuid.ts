@@ -1,7 +1,7 @@
 /**
- * UUIDv7 (RFC 9562): 48-bit Unix ms timestamp + version/variant + 74 bit ngẫu nhiên.
- * Có thứ tự theo thời gian → insert gọn vào B-tree của SQLite (ADR-007).
- * Monotonic trong cùng một millisecond: tăng counter 12 bit (rand_a) để giữ thứ tự.
+ * UUIDv7 (RFC 9562): 48-bit Unix ms timestamp + version/variant + 74 random bits.
+ * Time-ordered, so inserts stay compact in SQLite's B-tree (ADR-007).
+ * Monotonic within the same millisecond: a 12-bit counter (rand_a) preserves ordering.
  */
 let lastMs = -1;
 let counter = 0;
@@ -12,9 +12,9 @@ export function uuidv7(now: number = Date.now()): string {
 
   if (now === lastMs) {
     counter = (counter + 1) & 0x0fff;
-    if (counter === 0) now = lastMs + 1; // tràn counter → mượn ms kế tiếp
+    if (counter === 0) now = lastMs + 1; // counter overflow → borrow the next ms
   } else {
-    counter = ((bytes[6] ?? 0) & 0x07) << 8 | (bytes[7] ?? 0); // khởi tạo ngẫu nhiên, chừa dư địa tăng
+    counter = ((bytes[6] ?? 0) & 0x07) << 8 | (bytes[7] ?? 0); // random start, leaving headroom to increment
   }
   lastMs = now;
 
@@ -37,7 +37,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 
 export const isUuid = (v: unknown): v is string => typeof v === 'string' && UUID_RE.test(v);
 
-/** Lấy timestamp (ms) từ một UUIDv7. */
+/** Extract the timestamp (ms) from a UUIDv7. */
 export function uuidv7Timestamp(id: string): number {
   return parseInt(id.replace(/-/g, '').slice(0, 12), 16);
 }

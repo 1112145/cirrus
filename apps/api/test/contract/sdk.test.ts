@@ -1,6 +1,6 @@
 /**
- * Contract test: @directus/sdk 21.3.0 (đi kèm Directus 11.17.4) gọi thẳng vào Worker.
- * Mỗi milestone thêm command mới vào đây (spec §17.3).
+ * Contract tests: @directus/sdk 21.3.0 (ships with Directus 11.17.4) calling the Worker directly.
+ * Each milestone adds its new commands here (spec §17.3).
  */
 import { createDirectus, isDirectusError, rest, serverHealth, serverInfo, serverPing } from '@directus/sdk';
 import { describe, expect, it } from 'vitest';
@@ -23,7 +23,7 @@ describe('@directus/sdk contract — M0', () => {
     expect(health).toMatchObject({ status: 'ok' });
   });
 
-  it('lỗi được SDK nhận diện là DirectusError', async () => {
+  it('errors are recognized by the SDK as DirectusError', async () => {
     const err = await client
       .request(() => ({ method: 'GET', path: '/does-not-exist' }))
       .catch((e: unknown) => e);

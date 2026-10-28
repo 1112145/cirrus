@@ -1,53 +1,62 @@
 # Cirrus
 
-Headless CMS kiểu Directus chạy hoàn toàn trên Cloudflare (Workers + Hono, D1, R2, KV, Durable Objects, Queues).
-REST API tương thích `@directus/sdk` 21.3.0 (Directus 11.17.4). Kiến trúc: xem `cirrus-architecture.md` trong project.
+A Directus-style headless CMS that runs entirely on Cloudflare (Workers + Hono, D1, R2, KV, Durable Objects, Queues).
+Its REST API is compatible with `@directus/sdk` 21.3.0 (Directus 11.17.4). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design.
 
-## Cấu trúc
+> **Status:** early development. M0 (scaffold) is done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
+
+## Layout
 
 ```
-apps/api/            Worker Hono
+apps/api/            Hono Worker
   src/               routes, middleware
-  migrations/        D1 migrations cho system tables (cirrus_*)
-  test/              test chạy trong workerd; test/contract/ dùng @directus/sdk thật
+  migrations/        D1 migrations for the system tables (cirrus_*)
+  test/              tests running inside workerd; test/contract/ uses the real @directus/sdk
   wrangler.jsonc
-packages/shared/     error codes kiểu Directus, UUIDv7
+packages/shared/     Directus-style error codes, UUIDv7
+docs/                architecture and decision log
 ```
 
-`packages/query`, `packages/schema` (M1–M2), `packages/sdk` và `apps/admin` (M6) được thêm khi tới milestone tương ứng.
+`packages/query`, `packages/schema` (M1–M2), `packages/sdk` and `apps/admin` (M6) are added when their milestone starts.
 
-## Bắt đầu
+## Getting started
 
-Yêu cầu Node 22+ và pnpm 10.
+Requires Node 22+ and pnpm 10.
 
 ```bash
 pnpm install
-pnpm db:migrate:local      # tạo system tables trong D1 local
+pnpm db:migrate:local      # create the system tables in local D1
 pnpm dev                   # http://localhost:8787/server/ping → pong
-pnpm test                  # unit + contract test
+pnpm test                  # unit + contract tests
 pnpm typecheck
 ```
 
-## Deploy lần đầu
+## First deploy
 
 ```bash
 cd apps/api
-npx wrangler d1 create cirrus          # chép database_id vào wrangler.jsonc
+npx wrangler d1 create cirrus          # copy the database_id into wrangler.jsonc
 pnpm db:migrate:remote
 pnpm deploy
 ```
 
-## Quy ước
+## Conventions
 
-- Mọi lỗi ném `CirrusError(code, message)` từ `@cirrus/shared`; middleware serialize ra `{ errors: [{ message, extensions: { code } }] }`.
-- Primary key mặc định UUIDv7 (`uuidv7()` trong `@cirrus/shared`).
-- Không nối chuỗi SQL từ input: identifier phải khớp metadata, value luôn là bind parameter.
-- Mỗi endpoint mới cần có contract test trong `apps/api/test/contract/`.
-- `compatibility_date` trong `wrangler.jsonc` không được vượt ngày mà workerd của `@cloudflare/vitest-plugin` hỗ trợ.
+- Throw `CirrusError(code, message)` from `@cirrus/shared`; the error middleware serializes it as `{ errors: [{ message, extensions: { code } }] }`.
+- Primary keys default to UUIDv7 (`uuidv7()` in `@cirrus/shared`).
+- Never build SQL from input strings: identifiers must match metadata, values are always bind parameters.
+- Every new endpoint needs a contract test in `apps/api/test/contract/`.
+- `compatibility_date` in `wrangler.jsonc` must not exceed the date supported by the workerd bundled with `@cloudflare/vitest-plugin`.
 
-## Trạng thái
+## Roadmap
 
-| Milestone | Trạng thái |
+| Milestone | Status |
 |---|---|
 | M0 – Scaffold | ✅ |
 | M1 – Schema (collections/fields) | ⏳ |
+| M2 – Items | |
+| M3 – Auth & RBAC | |
+| M4 – Relations | |
+| M5 – Files | |
+| M6 – Admin UI MVP | |
+| M7+ – Extensions | |

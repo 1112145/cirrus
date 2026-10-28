@@ -1,6 +1,6 @@
 /**
- * Error codes và HTTP status theo Directus 11.x (ADR-008, ADR-009).
- * Mọi service ném CirrusError; middleware cuối serialize sang format Directus:
+ * Error codes and HTTP statuses matching Directus 11.x (ADR-008, ADR-009).
+ * Services throw CirrusError; the final middleware serializes it in Directus format:
  *   { "errors": [{ "message": "...", "extensions": { "code": "..." } }] }
  */
 export const ERROR_STATUS = {
