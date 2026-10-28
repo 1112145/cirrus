@@ -1,0 +1,89 @@
+import { env } from 'cloudflare:workers';
+import { describe, expect, it } from 'vitest';
+import { call } from './helpers.ts';
+
+describe('/server', () => {
+  it('GET /server/ping → pong', async () => {
+    const res = await call('/server/ping');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('pong');
+  });
+
+  it('GET /server/info → project info bọc trong data', async () => {
+    const res = await call('/server/info');
+    expect(res.status).toBe(200);
+    const body = await res.json<{ data: { project: { project_name: string } } }>();
+    expect(body.data.project.project_name).toBe('Cirrus');
+  });
+
+  it('GET /server/health → ok khi D1 sống', async () => {
+    const res = await call('/server/health');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('application/health+json');
+    expect(await res.json()).toMatchObject({ status: 'ok' });
+  });
+});
+
+describe('error format', () => {
+  it('route không tồn tại → ROUTE_NOT_FOUND kiểu Directus', async () => {
+    const res = await call('/nope');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({
+      errors: [{ message: "Route /nope doesn't exist.", extensions: { code: 'ROUTE_NOT_FOUND', path: '/nope' } }],
+    });
+  });
+});
+
+describe('system tables', () => {
+  const expected = [
+    'cirrus_access',
+    'cirrus_collections',
+    'cirrus_fields',
+    'cirrus_files',
+    'cirrus_permissions',
+    'cirrus_policies',
+    'cirrus_relations',
+    'cirrus_roles',
+    'cirrus_settings',
+    'cirrus_users',
+  ];
+
+  it('migration tạo đủ bảng', async () => {
+    const { results } = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'cirrus_%' ORDER BY name",
+    ).all<{ name: string }>();
+    expect(results.map((r) => r.name)).toEqual(expected);
+  });
+
+  it('seed schema_version', async () => {
+    const row = await env.DB.prepare("SELECT value FROM cirrus_settings WHERE key = 'schema_version'").first<{ value: string }>();
+    expect(row?.value).toBe('1');
+  });
+
+  it('chặn collection trùng prefix cirrus_', async () => {
+    await expect(env.DB.prepare("INSERT INTO cirrus_collections (collection) VALUES ('cirrus_hack')").run()).rejects.toThrow(
+      /CHECK constraint failed/,
+    );
+    await env.DB.prepare("INSERT INTO cirrus_collections (collection) VALUES ('posts')").run();
+  });
+
+  it('access không được gắn cả role lẫn user', async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO cirrus_roles (id, name) VALUES ('r1', 'Editor')"),
+      env.DB.prepare("INSERT INTO cirrus_users (id, email) VALUES ('u1', 'a@b.c')"),
+      env.DB.prepare("INSERT INTO cirrus_policies (id, name) VALUES ('p1', 'Content')"),
+    ]);
+    await expect(
+      env.DB.prepare("INSERT INTO cirrus_access (id, role, user, policy) VALUES ('a1', 'r1', 'u1', 'p1')").run(),
+    ).rejects.toThrow(/CHECK constraint failed/);
+    // public policy: cả hai NULL
+    await env.DB.prepare("INSERT INTO cirrus_access (id, policy) VALUES ('a2', 'p1')").run();
+  });
+
+  it('email user không phân biệt hoa thường', async () => {
+    await env.DB.prepare("INSERT INTO cirrus_users (id, email) VALUES ('u2', 'Khoa@Example.com')").run();
+    await expect(env.DB.prepare("INSERT INTO cirrus_users (id, email) VALUES ('u3', 'khoa@example.com')").run()).rejects.toThrow(
+      /UNIQUE constraint failed/,
+    );
+  });
+});

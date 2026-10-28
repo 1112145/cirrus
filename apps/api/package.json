@@ -1,0 +1,27 @@
+{
+  "name": "@cirrus/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@cirrus/shared": "workspace:*",
+    "hono": "4.13.14"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.9",
+    "@cloudflare/workers-types": "5.20261028.1",
+    "@directus/sdk": "21.3.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.154.0"
+  }
+}
