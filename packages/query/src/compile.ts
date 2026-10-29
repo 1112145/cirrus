@@ -121,7 +121,9 @@ function targetCondition(x: Ctx, target: Target, scope: Scope): string {
   return and([rows, scopeCondition(x, scope)]);
 }
 
-const returning = (c: QueryCollection) => ` RETURNING ${quoteIdent(c.primary)}`;
+/** RETURNING the primary key, and any other columns asked for. */
+const returning = (c: QueryCollection, extra: readonly string[] = []) =>
+  ` RETURNING ${[c.primary, ...extra.filter((f) => f !== c.primary).map((f) => column(c, f).field)].map(quoteIdent).join(', ')}`;
 
 /** Primary keys of the target rows that exist (within the scope). */
 export function selectKeys(c: QueryCollection, target: Target, scope: Scope = {}): Statement {
@@ -150,10 +152,10 @@ export function updateItems(c: QueryCollection, values: Row, target: Target, sco
   return { sql, params: x.p.values };
 }
 
-/** DELETE the target rows, returning their keys. */
-export function deleteItems(c: QueryCollection, target: Target, scope: Scope = {}): Statement {
+/** DELETE the target rows, returning their keys (and the `extra` columns). */
+export function deleteItems(c: QueryCollection, target: Target, scope: Scope = {}, extra: readonly string[] = []): Statement {
   const x = context(c, new Params(), scope);
-  const sql = `DELETE FROM ${tableOf(c)} WHERE ${targetCondition(x, target, scope)}${returning(c)}`;
+  const sql = `DELETE FROM ${tableOf(c)} WHERE ${targetCondition(x, target, scope)}${returning(c, extra)}`;
   return { sql, params: x.p.values };
 }
 

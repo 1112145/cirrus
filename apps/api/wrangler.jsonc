@@ -21,7 +21,15 @@
     "ACCESS_TOKEN_TTL": "15m",
     "REFRESH_TOKEN_TTL": "7d",
     "REFRESH_TOKEN_COOKIE_SECURE": "true",
-    "REFRESH_TOKEN_COOKIE_SAME_SITE": "lax"
+    "REFRESH_TOKEN_COOKIE_SAME_SITE": "lax",
+    // Files (spec §11), with Directus' names: the MIME types uploads may have. FILES_MAX_UPLOAD_SIZE
+    // (e.g. "100mb") caps each upload; unset, the plan's request size limit does.
+    "FILES_MIME_TYPE_ALLOW_LIST": "*/*",
+    // How long clients may cache assets.
+    "ASSETS_CACHE_TTL": "30d",
+    // Image transformations (IMAGES binding): most operations in `transforms`, largest source image side.
+    "ASSETS_TRANSFORM_MAX_OPERATIONS": "5",
+    "ASSETS_TRANSFORM_IMAGE_MAX_DIMENSION": "6000"
   },
 
   // database_id: replace with the real ID after running `wrangler d1 create cirrus`
@@ -32,13 +40,18 @@
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+
+  // Files' contents (spec §11): create it with `wrangler r2 bucket create cirrus-files`.
+  "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "cirrus-files" }],
+
+  // Cloudflare Images, for asset transformations (`/assets/:id?width=…`). Remove it to turn them off.
+  "images": { "binding": "IMAGES" }
 
   // Secrets (`wrangler secret put <name>`; locally in .dev.vars):
   // SECRET: signs access tokens; without it nobody can log in
   // ADMIN_TOKEN: optional static admin token, to create the first users (and as a way back in)
 
   // Added in later milestones:
-  // M5: r2_buckets STORAGE
   // M7: queues FLOWS, durable_objects REALTIME
 }

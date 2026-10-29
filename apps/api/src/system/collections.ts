@@ -135,6 +135,27 @@ function normalizeAccess(p: Payload): Payload {
   return p;
 }
 
+/** The storage location of files: Cirrus has one, the R2 bucket bound as STORAGE (Directus STORAGE_LOCATIONS). */
+export const STORAGE_LOCATION = 'r2';
+
+/**
+ * Files: requests can't set filename_disk, the object's key in the bucket, which Cirrus chooses
+ * (a record pointing at another file's object would serve that file's contents).
+ */
+function normalizeFile(p: Payload): Payload {
+  if (has(p, 'filename_disk')) throw invalidPayload('"filename_disk" is set by the server');
+  if (has(p, 'storage') && p.storage !== STORAGE_LOCATION) throw invalidPayload(`"storage" must be "${STORAGE_LOCATION}"`);
+  return p;
+}
+
+function normalizeFolder(p: Payload, { key }: { key: string | number | null }): Payload {
+  const self = key ?? p.id;
+  if (has(p, 'parent') && typeof p.parent === 'string' && typeof self === 'string' && p.parent.toLowerCase() === self.toLowerCase()) {
+    throw invalidPayload("A folder can't be its own parent");
+  }
+  return p;
+}
+
 // Collections ------------------------------------------------------------------------------------
 
 export const USERS = collection(
@@ -234,13 +255,59 @@ export const ACCESS = collection(
   { snapshot: true, defaults: {}, normalize: normalizeAccess },
 );
 
+export const FOLDERS = collection(
+  'directus_folders',
+  'cirrus_folders',
+  {
+    id: ID,
+    name: string(255, { required: true }),
+    parent: { type: 'uuid' },
+  },
+  { snapshot: false, defaults: {}, normalize: normalizeFolder },
+);
+
+/** Files (spec §11): the records; their contents are objects in the R2 bucket, at filename_disk. Fields in Directus' order. */
+export const FILES = collection(
+  'directus_files',
+  'cirrus_files',
+  {
+    id: ID,
+    title: string(255),
+    description: { type: 'text' },
+    tags: json,
+    location: { type: 'text' },
+    storage: string(255, { required: true }),
+    focal_point_x: { type: 'integer' },
+    focal_point_y: { type: 'integer' },
+    filename_disk: string(255, { unique: true }),
+    filename_download: string(255, { required: true }),
+    metadata: json,
+    type: string(255),
+    filesize: { type: 'bigInteger' },
+    created_on: { type: 'timestamp', required: true, special: ['date-created'] },
+    modified_by: { type: 'uuid', special: ['user-updated'] },
+    modified_on: { type: 'timestamp', required: true, special: ['date-created', 'date-updated'] },
+    embed: string(200),
+    uploaded_by: { type: 'uuid', special: ['user-created'] },
+    uploaded_on: { type: 'timestamp' },
+    folder: { type: 'uuid' },
+    width: { type: 'integer' },
+    height: { type: 'integer' },
+    charset: string(50),
+    duration: { type: 'integer' },
+  },
+  { snapshot: false, defaults: { storage: STORAGE_LOCATION }, normalize: normalizeFile },
+);
+
 export const SYSTEM_COLLECTIONS: ReadonlyMap<string, SystemCollection> = new Map(
-  [USERS, ROLES, POLICIES, PERMISSIONS, ACCESS].map((c) => [c.collection, c]),
+  [USERS, ROLES, POLICIES, PERMISSIONS, ACCESS, FILES, FOLDERS].map((c) => [c.collection, c]),
 );
 
 /**
- * Relations between system collections, as in Directus' system data. The cirrus_* tables' own
- * foreign keys keep them (migrations 0001, 0003): on_delete here only describes what those do.
+ * Relations between system collections, as in Directus' system data. Most are kept by the cirrus_*
+ * tables' own foreign keys (migrations 0001, 0003, 0005): on_delete there only describes what those
+ * do. directus_users.avatar has no foreign key (cirrus_users would need a rebuild, ADR-021), so the
+ * items service keeps it, like user relations.
  */
 let nextRelation = -1;
 const relation = (
@@ -250,7 +317,8 @@ const relation = (
   oneField: string | null,
   deselect: RelationRecord['deselect'],
   onDelete: RelationRecord['onDelete'],
-): RelationRecord => ({ id: nextRelation--, collection, field, related, oneField, junctionField: null, sortField: null, deselect, onDelete, system: true });
+  keptByTable = true,
+): RelationRecord => ({ id: nextRelation--, collection, field, related, oneField, junctionField: null, sortField: null, deselect, onDelete, system: keptByTable });
 
 export const SYSTEM_RELATIONS: readonly RelationRecord[] = [
   relation('directus_users', 'role', 'directus_roles', 'users', 'nullify', 'SET NULL'),
@@ -259,6 +327,11 @@ export const SYSTEM_RELATIONS: readonly RelationRecord[] = [
   relation('directus_access', 'user', 'directus_users', 'policies', 'delete', 'CASCADE'),
   relation('directus_access', 'policy', 'directus_policies', null, 'delete', 'CASCADE'),
   relation('directus_permissions', 'policy', 'directus_policies', 'permissions', 'delete', 'CASCADE'),
+  relation('directus_files', 'folder', 'directus_folders', null, 'nullify', 'SET NULL'),
+  relation('directus_files', 'uploaded_by', 'directus_users', null, 'nullify', 'SET NULL'),
+  relation('directus_files', 'modified_by', 'directus_users', null, 'nullify', 'SET NULL'),
+  relation('directus_folders', 'parent', 'directus_folders', null, 'nullify', 'NO ACTION'),
+  relation('directus_users', 'avatar', 'directus_files', null, 'nullify', 'SET NULL', false),
 ];
 
 /**
@@ -266,7 +339,7 @@ export const SYSTEM_RELATIONS: readonly RelationRecord[] = [
  * service, which applies on_delete; directus_access and directus_permissions rows are also deleted
  * by the tables' own cascades, which wouldn't.
  */
-export const RELATED_SYSTEM_COLLECTIONS = ['directus_users', 'directus_roles', 'directus_policies'];
+export const RELATED_SYSTEM_COLLECTIONS = ['directus_users', 'directus_roles', 'directus_policies', 'directus_files', 'directus_folders'];
 
 /** Map SQLite table names in error messages back to collection names. */
 export const collectionOfTable = (table: string) => [...SYSTEM_COLLECTIONS.values()].find((c) => c.table === table)?.collection ?? table;

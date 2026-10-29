@@ -20,6 +20,7 @@ import {
   type Row,
   type RowQuery,
   type Scope,
+  selectItems,
   selectKeys,
   type Statement,
   stashClosure,
@@ -201,6 +202,11 @@ type WriteOptions = {
   depth: number;
   /** Fields that link a nested item to its parent: no foreign key check. */
   trusted?: ReadonlySet<string>;
+  /**
+   * Values the server sets (a file's size, key and dimensions): they need no field permission and
+   * the system collection's normalizer doesn't see them, but validation does.
+   */
+  managed?: Record<string, unknown> | undefined;
 };
 
 /** Directus' reason for payload fields the request may not write. */
@@ -236,6 +242,7 @@ async function prepare(batch: Batch, ctx: ItemsContext, body: unknown, action: '
   }
   if (action === 'create' && ctx.system) payload = { ...ctx.system.defaults, ...payload };
   if (ctx.system?.normalize) payload = ctx.system.normalize(payload, { action, key, schema: ctx.req.schema });
+  if (opts.managed) payload = { ...payload, ...opts.managed };
 
   const { row, nested, m2o, refs, secrets } = await toRow(ctx, payload, action, opts.trusted);
   for (const n of m2o) {
@@ -328,10 +335,11 @@ function newKey(batch: Batch, ctx: ItemsContext, row: Row): Key | KeyRef {
 
 // Writes -----------------------------------------------------------------------------------------
 
-export async function createMany(ctx: ItemsContext, bodies: unknown[]): Promise<Key[]> {
+/** Create items; `managed` holds the values the server sets for each (see WriteOptions). Returns their keys. */
+export async function createMany(ctx: ItemsContext, bodies: unknown[], managed: ReadonlyArray<Record<string, unknown> | undefined> = []): Promise<Key[]> {
   const batch = new Batch();
   const prepared: Prepared[] = [];
-  for (const body of bodies) prepared.push(await prepare(batch, ctx, body, 'create', null, { depth: 1 }));
+  for (const [i, body] of bodies.entries()) prepared.push(await prepare(batch, ctx, body, 'create', null, { depth: 1, managed: managed[i] }));
   guardKeys(batch, ctx, prepared);
 
   const inserts: number[] = [];
@@ -364,9 +372,19 @@ export async function createMany(ctx: ItemsContext, bodies: unknown[]): Promise<
   return inserts.flatMap((i) => keysOf(ctx, results[i]));
 }
 
-export async function updateOne(ctx: ItemsContext, key: Key, body: unknown): Promise<Key> {
+export const updateOne = async (ctx: ItemsContext, key: Key, body: unknown): Promise<Key> => (await updateOneWith(ctx, key, body)).key;
+
+export type UpdateOptions = {
+  /** Values the server sets (see WriteOptions). */
+  managed?: Record<string, unknown>;
+  /** Columns to read as they were before the update, in the same batch (a replaced file's old key). */
+  previous?: readonly string[];
+};
+
+/** Update one item, with server-set values, and read some of its columns as they were before. */
+export async function updateOneWith(ctx: ItemsContext, key: Key, body: unknown, opts: UpdateOptions = {}): Promise<{ key: Key; previous: Item | null }> {
   const batch = new Batch();
-  const p = await prepare(batch, ctx, body, 'update', key, { depth: 1 });
+  const p = await prepare(batch, ctx, body, 'update', key, { depth: 1, managed: opts.managed });
   const pk = ctx.info.primary;
   if (pk in p.row) {
     if (p.row[pk] !== key) throw unchangedKey();
@@ -376,12 +394,15 @@ export async function updateOne(ctx: ItemsContext, key: Key, body: unknown): Pro
   // With permissions or nested writes, check the item first; plain admin updates just report it missing.
   if (p.access || p.nested.length || p.related) batch.add(ctx, guardItems(ctx.info, { key }, condition, scoped(ctx)));
   guardKeys(batch, ctx, [p]);
+  const [before] = opts.previous?.length
+    ? batch.add(ctx, selectItems(ctx.info, { fields: [...opts.previous], ...all({ [pk]: { _eq: key } }) }))
+    : [undefined];
   const [changed] = batch.add(ctx, update(ctx, p.row, { key }, { restrict: condition }));
   if (p.nested.length) await planNested(batch, ctx, key, p.nested, { created: false, depth: 1 });
   const results = await run(ctx, batch);
   // Directus answers FORBIDDEN for items that don't exist.
   if (results[changed!]!.length === 0) throw forbidden();
-  return key;
+  return { key, previous: before === undefined ? null : (results[before]![0] ?? null) };
 }
 
 /**
@@ -434,25 +455,29 @@ export async function updateBatch(ctx: ItemsContext, items: unknown[]): Promise<
   return [...new Set(changed.flatMap((i) => keysOf(ctx, results[i])))];
 }
 
-export async function deleteOne(ctx: ItemsContext, key: Key): Promise<void> {
+/** Delete one item; returns its key and the `returning` columns it had (a file's object key). */
+export async function deleteOne(ctx: ItemsContext, key: Key, returning: readonly string[] = []): Promise<Rows> {
   const access = ctx.access('delete');
   const batch = new Batch();
-  const deleted = planDelete(batch, ctx, { key }, scoped(ctx, { restrict: access?.filter ?? null }));
+  const deleted = planDelete(batch, ctx, { key }, scoped(ctx, { restrict: access?.filter ?? null }), 0, returning);
   const results = await run(ctx, batch);
   if (results[deleted]!.length === 0) throw forbidden();
+  return results[deleted]!;
 }
 
-export async function deleteMany(ctx: ItemsContext, target: { keys: Key[] } | { query: RowQuery }): Promise<void> {
-  if ('keys' in target && target.keys.length === 0) return;
+/** Delete items by keys or query; returns their keys and the `returning` columns they had. */
+export async function deleteMany(ctx: ItemsContext, target: { keys: Key[] } | { query: RowQuery }, returning: readonly string[] = []): Promise<Rows> {
+  if ('keys' in target && target.keys.length === 0) return [];
   const access = ctx.access('delete');
   const batch = new Batch();
+  let deleted: number;
   if ('keys' in target) {
     if (access) batch.add(ctx, guardItems(ctx.info, target, access.filter, scoped(ctx)));
-    planDelete(batch, ctx, target, scoped(ctx, { restrict: access?.filter ?? null }));
+    deleted = planDelete(batch, ctx, target, scoped(ctx, { restrict: access?.filter ?? null }), 0, returning);
   } else {
-    planDelete(batch, ctx, target, queryScope(ctx, access));
+    deleted = planDelete(batch, ctx, target, queryScope(ctx, access), 0, returning);
   }
-  await run(ctx, batch);
+  return (await run(ctx, batch))[deleted]!;
 }
 
 /** Update the singleton's item, creating it the first time. */
@@ -481,13 +506,13 @@ const MAX_CASCADE = 10;
  * (whole subtrees for self-references), SET NULL and SET DEFAULT reset those keys, and NO ACTION
  * fails if references remain once the other actions have run. Like a database's, these actions
  * don't check the request's permissions. Returns the position of the statement returning the
- * deleted keys.
+ * deleted keys (and the `returning` columns).
  */
-function planDelete(batch: Batch, d: Deletable, target: Target, scope: Scope, depth = 0): number {
+function planDelete(batch: Batch, d: Deletable, target: Target, scope: Scope, depth = 0, returning: readonly string[] = []): number {
   const { schema } = d.req;
   const name = d.info.collection;
   const effects = relationsTo(schema, name).filter((r) => checked(r) && queryInfo(schema, r.collection));
-  if (effects.length === 0) return batch.add(d, deleteItems(d.info, target, scope))[0]!;
+  if (effects.length === 0) return batch.add(d, deleteItems(d.info, target, scope, returning))[0]!;
 
   const slot = batch.slot();
   batch.add(d, stashKeys(d.info, target, scope, slot));
@@ -512,7 +537,7 @@ function planDelete(batch: Batch, d: Deletable, target: Target, scope: Scope, de
     }
   }
   for (const r of effects) if (r.onDelete === 'NO ACTION') refuse(r);
-  return batch.add(d, deleteItems(d.info, { slot }))[0]!;
+  return batch.add(d, deleteItems(d.info, { slot }, {}, returning))[0]!;
 }
 
 /** The default of an M2O field, for ON DELETE SET DEFAULT; null without one. */

@@ -49,7 +49,7 @@ export type RelationRecord = {
    * enforces; otherwise keys must reference items and deleting one does this (ADR-021).
    */
   onDelete: OnDelete | null;
-  /** Between system collections: their tables' own foreign keys enforce it. */
+  /** Between system collections, enforced by their tables' own foreign keys (not by the items service). */
   system?: boolean;
 };
 

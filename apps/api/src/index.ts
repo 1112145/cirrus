@@ -5,6 +5,7 @@ import { notFound, onError } from './middleware/errors.ts';
 import { auth } from './routes/auth.ts';
 import { collections } from './routes/collections.ts';
 import { fields } from './routes/fields.ts';
+import { assets, files, folders } from './routes/files.ts';
 import { items } from './routes/items.ts';
 import { relations } from './routes/relations.ts';
 import { server } from './routes/server.ts';
@@ -25,8 +26,9 @@ app.route('/roles', roles);
 app.route('/policies', policies);
 app.route('/permissions', permissions);
 app.route('/access', access);
-
-// M5: /files, /assets
+app.route('/files', files);
+app.route('/folders', folders);
+app.route('/assets', assets);
 
 app.notFound(notFound);
 app.onError(onError);

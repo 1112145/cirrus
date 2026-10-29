@@ -74,8 +74,31 @@ import {
   updateItemsBatch,
   updateSingleton,
   withSearch,
+  createFolder,
+  createFolders,
+  deleteFile,
+  deleteFiles,
+  deleteFolder,
+  deleteFolders,
+  importFile,
+  readAssetArrayBuffer,
+  readAssetBlob,
+  readAssetRaw,
+  readFile,
+  readFiles,
+  readFolder,
+  readFolders,
+  updateFile,
+  updateFiles,
+  updateFilesBatch,
+  updateFolder,
+  updateFolders,
+  updateFoldersBatch,
+  uploadFiles,
 } from '@directus/sdk';
+import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { JPEG, PNG } from '../fixtures.ts';
 import { ADMIN_TOKEN, ADMIN_ROLE, BASE, tableSql, workerFetch } from '../helpers.ts';
 
 const client = createDirectus(BASE, { globals: { fetch: workerFetch } }).with(rest());
@@ -621,5 +644,111 @@ describe('@directus/sdk contract — M4', () => {
     expect(await errorCode(admin.request(readRelation('posts', 'author')))).toBe('FORBIDDEN');
     // The field stays, now without a relation.
     expect(await admin.request(readItem('posts', ids.post!, { fields: ['author'] }))).toEqual({ author: ids.ada });
+  });
+});
+
+describe('@directus/sdk contract — M5', () => {
+  const ids: Record<string, string> = {};
+  const jpeg = (name: string) => new File([JPEG], name, { type: 'image/jpeg' });
+  type File = { id: string; title: string; filename_disk: string; type: string; width: number | null; folder: string | null };
+
+  it('createFolder(), createFolders(), readFolders(), readFolder(), updateFolder(), updateFolders(), updateFoldersBatch()', async () => {
+    const media = await admin.request(createFolder({ name: 'Media' }));
+    ids.media = media.id;
+    const [photos, docs] = await admin.request(createFolders([{ name: 'Photos', parent: media.id }, { name: 'Docs', parent: media.id }]));
+    ids.photos = photos!.id;
+    ids.docs = docs!.id;
+    expect(await admin.request(readFolders({ filter: { parent: { _eq: media.id } }, sort: ['name'], fields: ['name'] }))).toEqual([{ name: 'Docs' }, { name: 'Photos' }]);
+    expect(await admin.request(readFolder(photos!.id, { fields: ['name', { parent: ['name'] }] }))).toEqual({ name: 'Photos', parent: { name: 'Media' } });
+    expect(await admin.request(updateFolder(docs!.id, { name: 'Documents' }, { fields: ['name'] }))).toEqual({ name: 'Documents' });
+    await admin.request(updateFolders([photos!.id, docs!.id], { parent: null }));
+    await admin.request(updateFoldersBatch([{ id: photos!.id, name: 'Pictures' }]));
+    expect(await admin.request(readFolder(photos!.id, { fields: ['name', 'parent'] }))).toEqual({ name: 'Pictures', parent: null });
+  });
+
+  it('uploadFiles()', async () => {
+    const one = new FormData();
+    one.append('folder', ids.photos!);
+    one.append('file', jpeg('sdk-photo.jpg'));
+    const file = (await admin.request(uploadFiles(one))) as File;
+    expect(file).toMatchObject({ title: 'SDK Photo', type: 'image/jpeg', width: 40, folder: ids.photos, filename_disk: `${file.id}.jpg` });
+    ids.photo = file.id;
+
+    const two = new FormData();
+    two.append('title', 'Pixel');
+    two.append('file', new File([PNG], 'pixel.png', { type: 'image/png' }));
+    two.append('file', new File(['%PDF-1.4'], 'doc.pdf', { type: 'application/pdf' }));
+    const files = (await admin.request(uploadFiles(two, { fields: ['id', 'title', 'type'] }))) as File[];
+    expect(files.map((f) => [f.title, f.type])).toEqual([
+      ['Pixel', 'image/png'],
+      ['Doc', 'application/pdf'],
+    ]);
+    ids.pixel = files[0]!.id;
+    ids.doc = files[1]!.id;
+  });
+
+  it('readFiles(), readFile()', async () => {
+    expect(await admin.request(readFiles({ filter: { folder: { _eq: ids.photos } }, fields: ['title', { folder: ['name'] }] }))).toEqual([
+      { title: 'SDK Photo', folder: { name: 'Pictures' } },
+    ]);
+    expect(await admin.request(readFile(ids.pixel!, { fields: ['filename_download', 'width', 'height'] }))).toEqual({ filename_download: 'pixel.png', width: 2, height: 1 });
+  });
+
+  it('updateFile() with JSON, and with FormData to replace the contents', async () => {
+    expect(await admin.request(updateFile(ids.doc!, { title: 'Spec', folder: ids.docs }, { fields: ['title', 'folder'] }))).toEqual({ title: 'Spec', folder: ids.docs });
+    const replacement = new FormData();
+    replacement.append('file', new File([PNG], 'spec.png', { type: 'image/png' }));
+    const replaced = (await admin.request(updateFile(ids.doc!, replacement))) as File;
+    expect(replaced).toMatchObject({ id: ids.doc, title: 'Spec', type: 'image/png', width: 2 });
+  });
+
+  it('updateFiles(), updateFilesBatch()', async () => {
+    const updated = await admin.request(updateFiles([ids.pixel!, ids.doc!], { description: 'tiny' }, { fields: ['description'] }));
+    expect(updated).toEqual([{ description: 'tiny' }, { description: 'tiny' }]);
+    await admin.request(updateFilesBatch([{ id: ids.pixel!, tags: ['dot'] }]));
+    expect(await admin.request(readFile(ids.pixel!, { fields: ['tags'] }))).toEqual({ tags: ['dot'] });
+  });
+
+  it('importFile()', async () => {
+    const file = (await admin.request(importFile('https://files.test/images/sunset-photo.png', { folder: ids.photos }))) as File;
+    expect(file).toMatchObject({ title: 'Sunset Photo.png', type: 'image/png', folder: ids.photos, width: 2 });
+    ids.imported = file.id;
+  });
+
+  it('readAssetRaw(), readAssetBlob(), readAssetArrayBuffer()', async () => {
+    const raw = await admin.request(readAssetRaw(ids.photo!));
+    expect(new Uint8Array(await new Response(raw).arrayBuffer())).toEqual(JPEG);
+    const blob = await admin.request(readAssetBlob(ids.photo!));
+    expect(blob.type).toBe('image/jpeg');
+    expect(blob.size).toBe(JPEG.length);
+    const webp = await admin.request(readAssetArrayBuffer(ids.photo!, { width: 16, height: 16, fit: 'cover', format: 'webp' }));
+    expect(new TextDecoder().decode(new Uint8Array(webp).subarray(8, 12))).toBe('WEBP');
+    // Presets negotiate the format with Accept; the SDK sends none, so the file's own is kept.
+    const preset = await admin.request(readAssetBlob(ids.photo!, { key: 'system-small-contain' }));
+    expect(preset.type).toBe('image/jpeg');
+  });
+
+  // Done when (spec §14): a post can have a cover image.
+  it('a post with a cover image: createField(), createRelation() to directus_files, readItem() through it', async () => {
+    await admin.request(createCollection({ collection: 'stories', schema: {}, fields: [{ field: 'title', type: 'string' }] }));
+    await admin.request(createField('stories', { field: 'cover', type: 'uuid', meta: { interface: 'file-image', special: ['file'] }, schema: {} }));
+    await admin.request(createRelation({ collection: 'stories', field: 'cover', related_collection: 'directus_files', schema: { on_delete: 'SET NULL' } }));
+    const story = (await admin.request(createItem('stories', { title: 'Sunset', cover: ids.imported }))) as { id: string };
+    expect(await admin.request(readItem('stories', story.id, { fields: ['title', { cover: ['title', 'type', 'width'] }] }))).toEqual({
+      title: 'Sunset',
+      cover: { title: 'Sunset Photo.png', type: 'image/png', width: 2 },
+    });
+  });
+
+  it('deleteFile(), deleteFiles(), deleteFolder(), deleteFolders()', async () => {
+    const { filename_disk } = (await admin.request(readFile(ids.photo!, { fields: ['filename_disk'] }))) as File;
+    await admin.request(deleteFile(ids.photo!));
+    expect(await env.STORAGE!.head(filename_disk)).toBeNull();
+    expect(await errorCode(admin.request(readFile(ids.photo!)))).toBe('FORBIDDEN');
+    await admin.request(deleteFiles([ids.pixel!, ids.doc!, ids.imported!]));
+    expect(await admin.request(readFiles({ fields: ['id'] }))).toEqual([]);
+    await admin.request(deleteFolder(ids.photos!));
+    await admin.request(deleteFolders([ids.docs!, ids.media!]));
+    expect(await admin.request(readFolders())).toEqual([]);
   });
 });

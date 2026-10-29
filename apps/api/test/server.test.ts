@@ -41,6 +41,7 @@ describe('system tables', () => {
     'cirrus_collections',
     'cirrus_fields',
     'cirrus_files',
+    'cirrus_folders',
     'cirrus_guard',
     'cirrus_permissions',
     'cirrus_policies',

@@ -280,6 +280,13 @@ describe('writes', () => {
     expect(run(countItems(posts, null, null))).toEqual([{ count: 3 }]);
   });
 
+  it('returns other columns of deleted rows when asked', () => {
+    const { run } = database();
+    const [row] = run(deleteItems(posts, { key: 1 }, {}, ['title', 'id']));
+    expect(Object.keys(row!)).toEqual(['id', 'title']);
+    rejects(() => deleteItems(posts, { key: 2 }, {}, ['divider']), 'FORBIDDEN', `You don't have permission to access field "divider" in collection "posts" or it does not exist.`);
+  });
+
   it('only writes columns of the collection', () => {
     rejects(() => updateItems(posts, { divider: 1 }, { key: 1 }), 'FORBIDDEN', `You don't have permission to access field "divider" in collection "posts" or it does not exist.`);
   });

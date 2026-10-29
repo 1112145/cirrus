@@ -37,7 +37,7 @@ export const urlQuery = (c: Context<AppEnv>, ctx: ItemsContext) => toQuery(c.env
 type Batch = { keys?: unknown[]; query?: Record<string, unknown>; data?: unknown };
 
 /** Directus validateBatch: an object with either `keys` or `query`; updates also need `data`. */
-function parseBatch(body: unknown, needsData = false): Batch {
+export function parseBatch(body: unknown, needsData = false): Batch {
   if (!isPlainObject(body)) throw invalidPayload('Payload in body is required');
   if ((body.keys === undefined) === (body.query === undefined)) throw invalidPayload('Payload must contain either "keys" or "query"');
   if (body.keys !== undefined && !Array.isArray(body.keys)) throw invalidPayload('"keys" must be an array');
