@@ -1,21 +1,21 @@
 import { templateFields, templateOf } from '../lib/display.ts';
 import { keyOf } from '../lib/payload.ts';
-import { type Field, FILES, isAlias, isAutomatic, relationOf, type RelationInfo } from '../lib/schema.ts';
+import { type Field, isAlias, isAutomatic, relationOf, type RelationInfo } from '../lib/schema.ts';
+import { systemDisplay } from '../lib/system.ts';
 import { can, collectionOf, fieldsOf, primaryKeyOf, schema } from './schema.ts';
 
 /** What the screens need to ask for, derived from the data model. */
 
 /** How a collection's items are named (its display template). */
 export function templateFor(collection: string): string {
-  if (collection === FILES) return '{{ title }}';
-  return templateOf(collectionOf(collection), fieldsOf(collection));
+  return systemDisplay(collection)?.template ?? templateOf(collectionOf(collection), fieldsOf(collection));
 }
 
 export const relationFor = (field: Field): RelationInfo | null => relationOf(field, schema.relations);
 
 /** The paths to read for showing related items of `collection`: their key and their template's fields. */
 export function displayPaths(collection: string, prefix = ''): string[] {
-  const own = collection === FILES ? ['id', 'title', 'type', 'filename_download'] : [primaryKeyOf(collection), ...templateFields(templateFor(collection))];
+  const own = systemDisplay(collection)?.fields ?? [primaryKeyOf(collection), ...templateFields(templateFor(collection))];
   return [...new Set(own)].map((p) => `${prefix}${p}`);
 }
 

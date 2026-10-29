@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { readPage } from '../api.ts';
 import { FILES } from '../lib/schema.ts';
+import { pathOf } from '../lib/system.ts';
 import { displayPaths } from '../stores/model.ts';
 import { notifyError } from '../stores/notify.ts';
 import { primaryKeyOf } from '../stores/schema.ts';
@@ -22,7 +23,7 @@ const loading = ref(false);
 const chosen = ref<Map<string | number, Record<string, unknown>>>(new Map());
 
 const pk = computed(() => primaryKeyOf(props.collection));
-const path = computed(() => (props.collection === FILES ? '/files' : `/items/${props.collection}`));
+const path = computed(() => pathOf(props.collection));
 const pages = computed(() => Math.max(1, Math.ceil(total.value / PAGE)));
 
 async function load() {

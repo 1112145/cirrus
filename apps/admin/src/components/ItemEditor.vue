@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { createItem, deleteItem, readItem, readSingleton, updateItem, updateSingleton } from '@directus/sdk';
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from 'vue-router';
+import { computed, reactive, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
+import { useUnsavedGuard } from '../composables/unsaved.ts';
 import { request } from '../api.ts';
 import { renderTemplate } from '../lib/display.ts';
 import { errorCode, errorMessage, fieldErrors } from '../lib/errors.ts';
@@ -9,7 +10,7 @@ import { changes, type Item, keyOf, missingRequired, same } from '../lib/payload
 import { type Field, isAutomatic, isPrimaryKey, titleOf } from '../lib/schema.ts';
 import { formFields, formPaths, templateFor, toPayload } from '../stores/model.ts';
 import { confirm, notify, notifyError } from '../stores/notify.ts';
-import { can, collectionOf, fieldOf, primaryKeyOf, schema } from '../stores/schema.ts';
+import { can, collectionOf, fieldOf, type ItemAccess, itemAccess, primaryKeyOf, schema } from '../stores/schema.ts';
 import { session } from '../stores/session.ts';
 import ContentNav from './ContentNav.vue';
 import FieldInput from './FieldInput.vue';
@@ -36,6 +37,8 @@ const inputErrors = reactive<Record<string, string>>({});
 const loading = ref(false);
 const saving = ref(false);
 const missing = ref(false);
+/** What the user may do with this item, as /permissions/me says (a policy may allow some items only). */
+const access = ref<ItemAccess>({ update: true, delete: false });
 
 /** What the form shows when creating: the fields' defaults (the server applies them too). */
 function defaults(): Item {
@@ -54,6 +57,7 @@ async function load() {
   errors.value = {};
   for (const k of Object.keys(inputErrors)) delete inputErrors[k];
   missing.value = false;
+  access.value = { update: true, delete: false };
   if (creating.value) {
     original.value = defaults();
     return;
@@ -62,9 +66,12 @@ async function load() {
   original.value = null;
   try {
     const query = { fields: formPaths(props.collection) };
-    original.value = singleton.value
-      ? await request<Item>(readSingleton(props.collection, query))
-      : await request<Item>(readItem(props.collection, props.id!, query));
+    const [item, allowed] = await Promise.all([
+      singleton.value ? request<Item>(readSingleton(props.collection, query)) : request<Item>(readItem(props.collection, props.id!, query)),
+      itemAccess(props.collection, singleton.value ? null : props.id),
+    ]);
+    original.value = item;
+    access.value = allowed;
   } catch (e) {
     // Items the user may not read are reported as missing, like ones that don't exist.
     missing.value = true;
@@ -96,8 +103,8 @@ function setInputError(field: string, message: string | null) {
 // Permissions ------------------------------------------------------------------------------------
 
 const action = computed(() => (creating.value ? 'create' : 'update'));
-const mayWrite = computed(() => can(props.collection, action.value));
-const mayDelete = computed(() => !creating.value && !singleton.value && can(props.collection, 'delete'));
+const mayWrite = computed(() => can(props.collection, action.value) && (creating.value || access.value.update));
+const mayDelete = computed(() => !creating.value && !singleton.value && can(props.collection, 'delete') && access.value.delete);
 
 /** Fields the user may write: all for full access to every field, else those the permission lists. */
 function writable(field: Field): boolean {
@@ -168,29 +175,7 @@ async function remove() {
 
 // Unsaved changes ----------------------------------------------------------------------------------
 
-const leave = async () => !dirty.value || (await confirm('Discard your unsaved changes?', { action: 'Discard', danger: true }));
-onBeforeRouteLeave(leave);
-onBeforeRouteUpdate(leave);
-
-function beforeUnload(e: BeforeUnloadEvent) {
-  if (dirty.value) e.preventDefault();
-}
-
-function shortcut(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-    e.preventDefault();
-    void save();
-  }
-}
-
-onMounted(() => {
-  window.addEventListener('beforeunload', beforeUnload);
-  window.addEventListener('keydown', shortcut);
-});
-onBeforeUnmount(() => {
-  window.removeEventListener('beforeunload', beforeUnload);
-  window.removeEventListener('keydown', shortcut);
-});
+useUnsavedGuard(dirty, save);
 
 // Header -----------------------------------------------------------------------------------------
 
