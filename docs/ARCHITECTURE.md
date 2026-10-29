@@ -63,7 +63,7 @@
                  KV                               Durable Object (per collection/room)
 ```
 
-**Schema snapshot:** all metadata (collections, fields, relations, permissions) is loaded into one object, cached in KV and in isolate memory, and invalidated by `schema_version` whenever the schema changes.
+**Schema snapshot:** all metadata (collections, fields, relations, permissions) is loaded into one object and cached in isolate memory. Each request revalidates it with one small query on `cirrus_settings.schema_version` in D1, which every schema change replaces with a new value (ADR-012).
 
 ---
 
@@ -80,7 +80,7 @@ cirrus/
 └─ packages/
    ├─ shared/         # Directus error codes, UUIDv7, types, zod schemas, filter DSL types
    ├─ query/          # filter → SQL builder (pure, testable without D1) — M2
-   ├─ schema/         # DDL generator + migration planner — M1
+   ├─ schema/         # type mapping, DDL generator, migration planner (pure; tests run the SQL on node:sqlite) — M1
    └─ sdk/            # TypeScript client SDK — M7+
 ```
 
@@ -92,12 +92,12 @@ Tooling: pnpm 10 workspaces, TypeScript 5.9, Vitest 4 + `@cloudflare/vitest-plug
 
 ## 6. Data model — system tables
 
-Every system table uses the `cirrus_` prefix; user collections may not use it. The authoritative definition is [`apps/api/migrations/0001_system_tables.sql`](../apps/api/migrations/0001_system_tables.sql).
+Every system table uses the `cirrus_` prefix; user collections may not use it. The authoritative definition is [`apps/api/migrations/`](../apps/api/migrations/) (`0002` adds the full Directus collection/field meta).
 
 | Table | Purpose |
 |---|---|
-| `cirrus_collections` | One row per user collection (the real table name), plus label, icon, note, hidden, singleton, sort field |
-| `cirrus_fields` | Field metadata: type, primary/nullable/unique flags, default, admin interface + options, validation (filter DSL) |
+| `cirrus_collections` | One row per user collection (the real table name) or folder, plus the Directus collection meta (icon, note, hidden, singleton, sort field, group, …) |
+| `cirrus_fields` | Field metadata: type, column properties (primary/nullable/unique/indexed, default, auto-increment), Directus field meta (interface + options, special, validation, sort, group, …) |
 | `cirrus_relations` | `many_collection.many_field` → `one_collection`, optional O2M alias (`one_field`), junction field for M2M, `on_delete` |
 | `cirrus_roles` | Roles, nestable via `parent` (child roles inherit policies) |
 | `cirrus_policies` | `admin_access`, `app_access`, `ip_access` (CIDR list), `enforce_tfa` |
@@ -115,33 +115,41 @@ JSON columns carry a `json_valid()` CHECK; booleans are `0/1` with CHECKs.
 
 ### 7.1 Type mapping
 
-| Cirrus type | SQLite | Notes |
+Field types use the Directus names. User tables are `STRICT` (ADR-011), so SQLite rejects values the column type can't hold.
+
+| Field type | SQLite | Notes |
 |---|---|---|
-| string, text, uuid | TEXT | UUIDs generated in the app; primary keys use UUIDv7 (time-ordered, more compact B-tree than v4) |
-| integer, boolean | INTEGER | booleans stored as 0/1, converted on serialization |
-| float | REAL | |
-| datetime | TEXT | ISO 8601 UTC |
+| string, text, uuid, hash, csv | TEXT | UUIDs generated in the app; primary keys use UUIDv7 (time-ordered, more compact B-tree than v4) |
+| integer, bigInteger | INTEGER | |
+| boolean | INTEGER | 0/1 with a CHECK, converted on serialization |
+| float, decimal | REAL | SQLite has no exact decimal type |
+| dateTime, date, time, timestamp | TEXT | ISO 8601 (UTC for timestamp); `CURRENT_TIMESTAMP` / `now()` allowed as default |
 | json | TEXT | validated with a `json_valid()` CHECK |
 | alias | — | no column (O2M, M2M, UI dividers) |
 
+Primary keys: `uuid` (default, ADR-007), `string`, or `integer`/`bigInteger` with optional auto-increment.
+
 ### 7.2 DDL operations
 
-- **Create collection:** `CREATE TABLE` + metadata insert in one `db.batch()` so it is atomic.
-- **Add field:** `ALTER TABLE … ADD COLUMN` (SQLite cannot add a `UNIQUE` column or a `NOT NULL` column without a default this way).
-- **Rename field:** `ALTER TABLE … RENAME COLUMN`.
-- **Drop field:** `ALTER TABLE … DROP COLUMN` (blocked when the column has an index, FK or unique constraint → rebuild).
-- **Change type / nullable / unique / FK:** the standard SQLite **table rebuild**:
+Every schema change is one `db.batch()`: DDL + metadata writes + a compare-and-swap on `schema_version` (ADR-012), so it is atomic and can't be based on an outdated snapshot.
+
+- **Create collection:** `CREATE TABLE … STRICT` + indexes + metadata. Without `schema` it is a Directus folder: metadata only.
+- **Unique / indexed:** separate indexes named `<collection>.<field>.unique|index` (dots can't appear in names, so they never collide with tables), so toggling them is `CREATE/DROP INDEX`, never a rebuild.
+- **Add field:** `ALTER TABLE … ADD COLUMN`. A `NOT NULL` column without default only works while the table is empty (`CONTAINS_NULL_VALUES` otherwise); a non-constant default (`CURRENT_TIMESTAMP`) needs a rebuild.
+- **Drop field:** drop its index, then `ALTER TABLE … DROP COLUMN`.
+- **Rename field / collection:** not supported (Directus doesn't support it either).
+- **Change type / nullable / default (FK in M4):** the standard SQLite **table rebuild**:
   1. `CREATE TABLE _new_x (…)` with the new schema
   2. `INSERT INTO _new_x SELECT … FROM x` (with casts)
   3. `DROP TABLE x`
   4. `ALTER TABLE _new_x RENAME TO x`
   5. Recreate indexes
 
-  All in one batch. The admin UI must warn about it, since it is slow on large tables.
+  All in one batch, with the temporary table named `cirrus_rebuild_<name>`. Values are copied without casts: `STRICT` makes the copy fail (and the batch roll back) when existing values don't fit the new type, instead of silently converting them. The admin UI must warn about rebuilds, since they are slow on large tables.
 
 ### 7.3 Migration planner
 
-`packages/schema` takes `(current metadata, desired metadata)` and returns a list of DDL steps plus a `requiresRebuild` flag. It is pure logic, so it can be tested thoroughly without D1.
+`packages/schema` takes `(current metadata, desired metadata)` and returns a list of DDL steps plus a `requiresRebuild` flag (`planTableChange`). It is pure logic; its tests execute the generated SQL on Node's built-in SQLite, without D1.
 
 Later: `GET /schema/snapshot` + `POST /schema/apply` to version the schema in git (like Directus schema snapshots).
 
@@ -280,7 +288,7 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | Milestone | Content | Done when |
 |---|---|---|
 | **M0 – Scaffold** ✅ | Monorepo, Hono Worker, D1 binding, system table migrations, CI | `wrangler dev` runs and tests pass (contract: `serverPing`/`serverInfo`/`serverHealth`) |
-| **M1 – Schema** | Collections/fields API, DDL generator, schema snapshot | A `posts` collection can be created via the API |
+| **M1 – Schema** ✅ | Collections/fields API, DDL generator, schema snapshot | A `posts` collection can be created via the API |
 | **M2 – Items** | Dynamic CRUD + filter/sort/fields/pagination | CRUD on `posts` with nested `_and/_or` filters |
 | **M3 – Auth & RBAC** | Login, JWT, roles, policies, permissions + row-level | An "editor" role only sees its own posts |
 | **M4 – Relations** | M2O, O2M, M2M + nested `fields` | `posts.author.name`, `posts.tags.*` |
@@ -295,7 +303,7 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | # | Issue | Notes |
 |---|---|---|
 | R1 | Rebuilding large tables may be slow or hit time limits | Warn in the UI; consider chunked rebuilds via Queues |
-| R2 | Schema snapshots drifting between isolates | Check `schema_version` in KV on each request (cheap) |
+| R2 | Schema snapshots drifting between isolates | Check `schema_version` in D1 on each request (one small, strongly consistent query) — ADR-012 |
 | R3 | Deep relational queries causing N+1 / CPU cost | Depth limit, batched `IN (…)` |
 | R4 | D1's single writer under concurrent writes | Acceptable for single-project; monitor latency |
 | R5 | Combining row-level filters and field permissions across policies makes SQL complex (`CASE WHEN` per field) | Test heavily in `packages/query`; cache merged permissions per policy set |
@@ -322,6 +330,9 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | ADR-008 | REST API compatible with `@directus/sdk` (requests, responses, errors, auth) for supported endpoints | ✅ Accepted |
 | ADR-009 | Compatibility target is **Directus 11.x**, not v12: v12 enforces licensing (collection/seat/flow limits on the Core tier) and changes the API (`?version=published`, `archived` collections). Pinned: reference server **Directus 11.17.4** (last 11.x release), client **`@directus/sdk` 21.3.0** (released the same day, 2026-04-30; SDK 22.0.0 ships with Directus 12) | ✅ Accepted |
 | ADR-010 | Access control follows the Directus 11 policy model: nested roles, policies attached to roles or users, permissions belong to policies, additive across policies | ✅ Accepted |
+| ADR-011 | User tables are `STRICT`; unique/indexed flags are separate named indexes, so toggling them never rebuilds the table | ✅ Accepted |
+| ADR-012 | Schema snapshot cached in isolate memory and revalidated against `schema_version` in D1 on each request, not in KV: KV is eventually consistent (up to ~60 s), which would serve outdated schemas after a change, and a cold load is a single D1 batch anyway. Each schema change writes a new UUIDv7 `schema_version` with a compare-and-swap in the same batch, so concurrent changes can't overwrite each other | ✅ Accepted |
+| ADR-013 | Until users and auth exist (M3), admin access is the `ADMIN_TOKEN` secret, sent like a Directus static token (`Authorization: Bearer` or `?access_token=`). Without it, schema endpoints answer `FORBIDDEN` | ✅ Accepted (temporary) |
 
 ---
 
@@ -342,7 +353,7 @@ Goal: a client written as `createDirectus(url).with(rest()).with(authentication(
 
 ### 17.2 Design consequences
 
-- **Storage and API shape are separate layers.** `cirrus_fields` stays flat (§6); a mapper (`packages/shared/directus-shape`) converts to and from the `meta`/`schema` shape, so the internal model is not tied to the Directus format.
+- **Storage and API shape are separate layers.** `cirrus_fields` stays flat (§6); `apps/api/src/schema/meta.ts` (one spec per meta property: validation, default, column) and `directus.ts` convert to and from the `meta`/`schema` shape, so the internal model is not tied to the Directus format.
 - **System collection names.** The SDK uses dedicated paths (`/users`, `/files`, …) rather than `/items/directus_users`, so the internal `cirrus_` prefix can stay. Relations pointing at users/files must still map `directus_users` ↔ `cirrus_users` and `directus_files` ↔ `cirrus_files`.
 - **Error codes** live in one shared module; services throw errors with a standard `code` and the final middleware serializes them in Directus format.
 - **Data types:** gradually add the common Directus types (`dateTime`, `timestamp`, `date`, `time`, `bigInteger`, `decimal`, `csv`, `hash`) to the mapping in §7.1.
@@ -350,7 +361,7 @@ Goal: a client written as `createDirectus(url).with(rest()).with(authentication(
 ### 17.3 Compatibility testing
 
 - A **contract test** suite runs the real `@directus/sdk` 21.3.0 against the local Worker via `@cloudflare/vitest-plugin`.
-- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`; M2 → `readItems`, `createItem`, `updateItem`, `deleteItem`; M3 → `login`, `refresh`, `readMe`; M5 → `uploadFiles`.
+- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`, `readCollections`, `readCollection`, `readFields`, `readFieldsByCollection`, `readField`, `updateCollection`, `updateCollectionsBatch`, `updateField`, `updateFields`, `deleteField`, `deleteCollection`; M2 → `readItems`, `createItem`, `updateItem`, `deleteItem`; M3 → `login`, `refresh`, `readMe`; M5 → `uploadFiles`.
 - With a real Directus available, send the same requests to both and compare response snapshots (ignoring ids and timestamps). The reference server uses the `directus/directus:11.17.4` image (not v12, which limits collections on the Core tier).
 - `@directus/sdk` is MIT-licensed; the licensing limits apply only to the Directus server, not to using the SDK as a test client.
 

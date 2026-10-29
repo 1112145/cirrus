@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CirrusError, isUuid, uuidv7, uuidv7Timestamp } from '../src/index.ts';
+import { CirrusError, forbidden, invalidPayload, isUuid, uuidv7, uuidv7Timestamp } from '../src/index.ts';
 
 describe('uuidv7', () => {
   it('has a valid format and version 7', () => {
@@ -40,5 +40,22 @@ describe('CirrusError', () => {
   it('keeps extra extensions without overriding code', () => {
     const e = new CirrusError('RECORD_NOT_UNIQUE', 'dup', { collection: 'posts', field: 'slug', code: 'X' });
     expect(e.toBody().errors[0]!.extensions).toEqual({ collection: 'posts', field: 'slug', code: 'RECORD_NOT_UNIQUE' });
+  });
+});
+
+describe('error helpers', () => {
+  it('invalidPayload follows the Directus message format', () => {
+    expect(invalidPayload('Collection "posts" already exists').toBody()).toEqual({
+      errors: [
+        {
+          message: 'Invalid payload. Collection "posts" already exists.',
+          extensions: { reason: 'Collection "posts" already exists', code: 'INVALID_PAYLOAD' },
+        },
+      ],
+    });
+  });
+
+  it('forbidden is a 403', () => {
+    expect(forbidden().status).toBe(403);
   });
 });
