@@ -37,6 +37,13 @@ export function permissionsFor(
   return out;
 }
 
+/** Every permission of the request's policies (and the app's minimal ones), on any collection. Not for admins. */
+export function allPermissions(schema: Schema, a: Accountability): Array<Omit<PermissionRecord, 'id' | 'policy'>> {
+  const out: Array<Omit<PermissionRecord, 'id' | 'policy'>> = a.policies.flatMap((id) => schema.access.permissions.get(id) ?? []);
+  if (a.app) out.push(...APP_MINIMAL);
+  return out;
+}
+
 /** Every collection the request has a permission on, with the actions. */
 export function permittedCollections(schema: Schema, a: Accountability): Map<string, Set<Action>> {
   const out = new Map<string, Set<Action>>();

@@ -1,5 +1,5 @@
 import { invalidQuery, isPlainObject } from '@cirrus/shared';
-import type { Filter, MetaKey, Query } from './types.ts';
+import type { Deep, DeepQuery, Filter, MetaKey, Query } from './types.ts';
 
 /**
  * Raw Directus query parameters (from the query string or a SEARCH body) → a validated Query.
@@ -14,7 +14,10 @@ export type FilterVariables = {
   role?: string | null;
   roles?: readonly string[];
   policies?: readonly string[];
-  /** Field values for `$CURRENT_USER.<field>` and `$CURRENT_ROLE.<field>`; missing fields resolve to null. */
+  /**
+   * Field values for `$CURRENT_USER.<path>` and `$CURRENT_ROLE.<path>`, related items nested as in
+   * a read (`{ role: { name } }`); missing fields resolve to null.
+   */
   userRecord?: Readonly<Record<string, unknown>> | null;
   roleRecord?: Readonly<Record<string, unknown>> | null;
 };
@@ -24,8 +27,16 @@ export type SanitizeOptions = {
   limitDefault: number;
   /** Largest allowed limit, -1 for none (Directus QUERY_LIMIT_MAX). With a maximum, limit=-1 means the maximum. */
   limitMax: number;
+  /**
+   * Most segments a path into relations may have, in `fields`, `sort`, `filter` and `deep`
+   * (Directus MAX_RELATIONAL_DEPTH; at least 2). Default 10, as in Directus.
+   */
+  maxRelationalDepth?: number;
   variables: FilterVariables;
 };
+
+/** Directus MAX_RELATIONAL_DEPTH default. */
+export const DEFAULT_RELATIONAL_DEPTH = 10;
 
 /** Parameters that would change the response shape; refusing them beats silently ignoring them. */
 const UNSUPPORTED = ['aggregate', 'groupBy', 'alias'];
@@ -37,17 +48,22 @@ export function sanitizeQuery(raw: Record<string, unknown>, opts: SanitizeOption
   const limit = sanitizeLimit(raw.limit, opts);
   const offset = sanitizeInteger(raw.offset, 'offset', 0) ?? 0;
   const page = sanitizeInteger(raw.page, 'page', 0);
-  return {
+  const q: Query = {
     fields: sanitizeList(raw.fields, 'fields') ?? ['*'],
     filter: sanitizeFilter(raw.filter, opts.variables),
     search: sanitizeSearch(raw.search),
     sort: sanitizeList(raw.sort, 'sort'),
     limit,
     // As in Directus, page wins over offset.
-    offset: page !== null && page > 1 && limit !== -1 ? limit * (page - 1) : offset,
+    offset: pageOffset(limit, page, offset),
     meta: sanitizeMeta(raw.meta),
+    deep: sanitizeDeep(raw.deep, opts),
   };
+  checkDepth(q, Math.max(2, opts.maxRelationalDepth ?? DEFAULT_RELATIONAL_DEPTH));
+  return q;
 }
+
+const pageOffset = (limit: number, page: number | null, offset: number) => (page !== null && page > 1 && limit !== -1 ? limit * (page - 1) : offset);
 
 /** "a,b" or ["a", "b,c"] → ["a", "b", "c"]; null when absent or empty. */
 function sanitizeList(v: unknown, name: string): string[] | null {
@@ -102,6 +118,93 @@ function sanitizeMeta(v: unknown): MetaKey[] {
   }
   return [...out];
 }
+
+// Deep -------------------------------------------------------------------------------------------
+
+/** Query parameters a deep query may set, as in Directus (`_filter`, `_sort`, …). */
+const DEEP_PARAMS = new Set(['_filter', '_search', '_sort', '_limit', '_offset', '_page']);
+
+/**
+ * Directus `deep`: `{ comments: { _limit: 5, _sort: '-date', author: { _filter: {…} } } }`, as JSON
+ * or in bracket syntax. Keys starting with `_` are the query of the related items; the others are
+ * their relational fields. Fields that aren't relational are ignored when the query is read.
+ */
+function sanitizeDeep(v: unknown, opts: SanitizeOptions): Deep | null {
+  if (v === undefined || v === null || v === '') return null;
+  let deep = v;
+  if (typeof deep === 'string') {
+    try {
+      deep = JSON.parse(deep);
+    } catch {
+      throw invalidQuery('Invalid JSON for deep object');
+    }
+  }
+  if (!isPlainObject(deep)) throw invalidQuery('"deep" has to be an object');
+  return parseDeep(deep, opts, 'deep', 0);
+}
+
+function parseDeep(v: Record<string, unknown>, opts: SanitizeOptions, path: string, depth: number): Deep {
+  if (depth > MAX_FILTER_DEPTH) throw invalidQuery('"deep" is nested too deeply');
+  const out: Deep = Object.create(null);
+  for (const [field, value] of Object.entries(v)) {
+    if (field.startsWith('_')) throw invalidQuery(`"${path}.${field}" has to be nested in a relational field`);
+    if (!isPlainObject(value)) throw invalidQuery(`"${path}.${field}" has to be an object`);
+    out[field] = parseDeepQuery(value, opts, `${path}.${field}`, depth);
+  }
+  return out;
+}
+
+function parseDeepQuery(v: Record<string, unknown>, opts: SanitizeOptions, path: string, depth: number): DeepQuery {
+  const params: Record<string, unknown> = {};
+  const nested: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(v)) {
+    if (!key.startsWith('_')) nested[key] = value;
+    else if (DEEP_PARAMS.has(key)) params[key.slice(1)] = value;
+    else throw invalidQuery(`"${path}.${key}" is not supported`);
+  }
+  const limit = params.limit === undefined || params.limit === null || params.limit === '' ? null : sanitizeLimit(params.limit, opts);
+  const offset = sanitizeInteger(params.offset, 'offset', 0) ?? 0;
+  const page = sanitizeInteger(params.page, 'page', 0);
+  return {
+    filter: sanitizeFilter(params.filter, opts.variables),
+    search: sanitizeSearch(params.search),
+    sort: sanitizeList(params.sort, 'sort'),
+    limit,
+    offset: pageOffset(limit ?? opts.limitDefault, page, offset),
+    deep: Object.keys(nested).length ? parseDeep(nested, opts, path, depth + 1) : null,
+  };
+}
+
+// Relational depth -------------------------------------------------------------------------------
+
+const tooDeep = () => invalidQuery('Max relational depth exceeded');
+
+/** How many fields deep a filter goes: `{ author: { name: { _eq } } }` is 2. Operators and groups don't count. */
+function filterDepth(v: unknown): number {
+  if (Array.isArray(v)) return Math.max(0, ...v.map(filterDepth));
+  if (!isPlainObject(v)) return 0;
+  let depth = 0;
+  for (const [key, x] of Object.entries(v)) depth = Math.max(depth, (key.startsWith('_') ? 0 : 1) + filterDepth(x));
+  return depth;
+}
+
+/** Directus validateRelationalDepth: paths in fields, sort, filter and deep have at most `max` segments. */
+function checkDepth(q: Query, max: number) {
+  const segments = (path: string) => path.split('.').length;
+  if ([...q.fields, ...(q.sort ?? [])].some((f) => segments(f) > max)) throw tooDeep();
+  if (filterDepth(q.filter) > max) throw tooDeep();
+  const walk = (deep: Deep | null, depth: number) => {
+    for (const d of Object.values(deep ?? {})) {
+      // `depth` fields lead to these related items, so their own fields are one more.
+      if (depth >= max || depth + filterDepth(d.filter) > max) throw tooDeep();
+      if ((d.sort ?? []).some((s) => depth + segments(s) > max)) throw tooDeep();
+      walk(d.deep, depth + 1);
+    }
+  };
+  walk(q.deep ?? null, 1);
+}
+
+// Filters (sanitize) -----------------------------------------------------------------------------
 
 function sanitizeFilter(v: unknown, vars: FilterVariables): Filter | null {
   if (v === undefined || v === null || v === '') return null;
@@ -158,7 +261,7 @@ function parseValue(v: unknown, vars: FilterVariables): unknown {
   return resolveVariable(v, vars);
 }
 
-/** Field paths of `$CURRENT_USER.<field>` / `$CURRENT_ROLE.<field>` (relational paths arrive with M4). */
+/** Field paths of `$CURRENT_USER.<path>` / `$CURRENT_ROLE.<path>`; paths may go through relations (`role.name`). */
 const RECORD_VARIABLE = /^\$CURRENT_(USER|ROLE)\.(.+)$/;
 
 /** A dynamic variable's value; any other string is returned as is. */
@@ -175,11 +278,19 @@ export function resolveVariable(v: string, vars: FilterVariables): unknown {
       return [...(vars.policies ?? [])];
   }
   const m = RECORD_VARIABLE.exec(v);
-  if (m) {
-    const record = m[1] === 'USER' ? vars.userRecord : vars.roleRecord;
-    return record && Object.hasOwn(record, m[2]!) ? (record[m[2]!] ?? null) : null;
-  }
+  if (m) return pathValue(m[1] === 'USER' ? vars.userRecord : vars.roleRecord, m[2]!.split('.'));
   return v;
+}
+
+/**
+ * A record's value at a path; missing fields are null. Through an O2M (a list of related items),
+ * the values of every item, as one list: `$CURRENT_USER.policies.policy`.
+ */
+function pathValue(v: unknown, path: string[]): unknown {
+  if (path.length === 0) return v ?? null;
+  if (Array.isArray(v)) return v.flatMap((x) => pathValue(x, path));
+  if (!isPlainObject(v) || !Object.hasOwn(v, path[0]!)) return null;
+  return pathValue(v[path[0]!], path.slice(1));
 }
 
 /**

@@ -1,38 +1,59 @@
-import type { QueryField, Row } from '@cirrus/query';
+import { isKeyRef, type Present, type QueryField, type Row } from '@cirrus/query';
 import { type DbValue, formatTemporal, fromDbValue, isIntegerString, isUuidLike, NOW, toDbValue, ValueMismatch } from '@cirrus/schema';
-import { CirrusError, forbidden, hashSecret, invalidPayload, sha256Hex, uuidv7 } from '@cirrus/shared';
-import type { FieldRecord, O2M } from '../schema/store.ts';
+import { CirrusError, forbidden, hashSecret, invalidPayload, isPlainObject, sha256Hex, uuidv7 } from '@cirrus/shared';
+import { anyCollection, type FieldRecord, m2oOf, o2mOf, type RelationRecord, type Schema } from '../schema/store.ts';
 import type { ItemsContext } from './context.ts';
 
 export type Item = Record<string, unknown>;
 export type Key = string | number;
 
-/** An O2M alias in a payload: a nested write to the related items (system collections until M4). */
-export type Nested = { field: FieldRecord & { o2m: O2M }; value: unknown };
+/** A relational field in a payload: a nested write to the related items. */
+export type Nested = { field: FieldRecord; relation: RelationRecord; value: unknown };
 
 export type Converted = {
   row: Row;
+  /** O2M aliases: written after the item, since the related items point at it. */
   nested: Nested[];
+  /** M2O fields given as objects: written before the item, which gets their keys. */
+  m2o: Array<Nested & { value: Record<string, unknown> }>;
+  /** M2O fields set to keys that must reference items (relations with a schema). */
+  refs: string[];
   /** Fields whose values are hashed once validation has seen them. */
   secrets: string[];
 };
 
 /**
  * API payload → column values, like Directus' PayloadService: applies field specials and checks
- * each value against its field type. Keys that aren't columns are ignored, as in Directus; O2M
- * aliases with nested-write support come back as `nested`. Hashing waits for hashSecrets(), so
+ * each value against its field type. Keys that aren't columns are ignored, as in Directus;
+ * relational fields come back as nested writes. Values that are keys stashed in the batch
+ * (KeyRef, from nested creates) are taken as they are; so are the `trusted` fields' keys (a nested
+ * O2M's link to its parent), which need no foreign key check. Hashing waits for hashSecrets(), so
  * validation sees the values as sent.
  */
-export async function toRow(ctx: ItemsContext, payload: Record<string, unknown>, action: 'create' | 'update'): Promise<Converted> {
+export async function toRow(
+  ctx: ItemsContext,
+  payload: Record<string, unknown>,
+  action: 'create' | 'update',
+  trusted: ReadonlySet<string> = new Set(),
+): Promise<Converted> {
   const { collection, now } = ctx;
-  const row: Row = {};
-  const nested: Nested[] = [];
-  const secrets: string[] = [];
+  const schema = ctx.req.schema;
+  const out: Converted = { row: {}, nested: [], m2o: [], refs: [], secrets: [] };
 
   for (const f of collection.fields) {
     let value = Object.hasOwn(payload, f.field) ? payload[f.field] : undefined;
     if (!f.column) {
-      if (f.o2m && value !== undefined) nested.push({ field: f as Nested['field'], value });
+      const relation = o2mOf(schema, collection.collection, f.field);
+      if (relation && value !== undefined) out.nested.push({ field: f, relation, value });
+      continue;
+    }
+    if (isKeyRef(value)) {
+      out.row[f.field] = value;
+      continue;
+    }
+    const relation = m2oOf(schema, collection.collection, f.field);
+    if (relation && isPlainObject(value)) {
+      out.m2o.push({ field: f, relation, value });
       continue;
     }
     const special = f.meta.special ?? [];
@@ -59,11 +80,15 @@ export async function toRow(ctx: ItemsContext, payload: Record<string, unknown>,
         field: f.field,
       });
     }
-    if (v !== null && (f.type === 'hash' || special.includes('hash') || special.includes('static-token'))) secrets.push(f.field);
-    row[f.field] = v;
+    if (v !== null && (f.type === 'hash' || special.includes('hash') || special.includes('static-token'))) out.secrets.push(f.field);
+    if (v !== null && relation && checked(relation) && !trusted.has(f.field)) out.refs.push(f.field);
+    out.row[f.field] = v;
   }
-  return { row, nested, secrets };
+  return out;
 }
+
+/** Relations whose keys Cirrus checks: user relations with a schema (system tables check their own). */
+export const checked = (r: RelationRecord) => r.onDelete !== null && !r.system;
 
 /**
  * Hash secret fields in place: `hash` fields with PBKDF2-SHA256 (PHC format); static tokens with
@@ -72,7 +97,7 @@ export async function toRow(ctx: ItemsContext, payload: Record<string, unknown>,
 export async function hashSecrets(ctx: ItemsContext, row: Row, secrets: readonly string[]): Promise<void> {
   for (const name of secrets) {
     const v = row[name];
-    if (v === null || v === undefined) continue;
+    if (v === null || v === undefined || isKeyRef(v)) continue;
     const f = ctx.collection.fields.find((x) => x.field === name)!;
     row[name] = f.meta.special?.includes('static-token') ? await sha256Hex(String(v)) : await hashSecret(String(v));
   }
@@ -80,17 +105,24 @@ export async function hashSecrets(ctx: ItemsContext, row: Row, secrets: readonly
 
 const CONCEALED = '**********';
 
-/** Rows → items: stored values back to their API form; `conceal` fields are masked, as in Directus. */
-export function toItems(ctx: ItemsContext, fields: readonly QueryField[], rows: Array<Record<string, unknown>>): Item[] {
-  const concealed = new Set(ctx.collection.fields.filter((f) => f.meta.special?.includes('conceal')).map((f) => f.field));
-  return rows.map((row) => {
-    const item: Item = {};
-    for (const f of fields) {
-      const v = fromDbValue(f.type, row[f.field]);
-      item[f.field] = concealed.has(f.field) && v !== null ? CONCEALED : v;
+const maskedCache = new WeakMap<Schema, Map<string, Set<string>>>();
+
+/** Stored values → API values, for any collection a read reaches: booleans, JSON, CSV; `conceal` fields are masked, as in Directus. */
+export function presenter(schema: Schema): Present {
+  let cache = maskedCache.get(schema);
+  if (!cache) maskedCache.set(schema, (cache = new Map()));
+  const masked = (collection: string) => {
+    let set = cache.get(collection);
+    if (!set) {
+      set = new Set(anyCollection(schema, collection)?.fields.filter((f) => f.meta.special?.includes('conceal')).map((f) => f.field));
+      cache.set(collection, set);
     }
-    return item;
-  });
+    return set;
+  };
+  return (c, f, raw) => {
+    const v = fromDbValue(f.type, raw);
+    return v !== null && masked(c.collection).has(f.field) ? CONCEALED : v;
+  };
 }
 
 /** A singleton without its row reads as the field defaults (Directus readSingleton). */

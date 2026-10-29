@@ -25,15 +25,10 @@ import { readJson } from '../middleware/body.ts';
  * (/users, /roles, …): list, SEARCH, read, create, update and delete, one or many.
  */
 
-const intVar = (v: string | undefined, fallback: number) => (v !== undefined && /^-?\d+$/.test(v.trim()) ? Number(v) : fallback);
-
 /** A sanitized query, with the dynamic variables of the request (and the user fields it refers to). */
-export async function toQuery(env: Bindings, ctx: ItemsContext, raw: Record<string, unknown>): Promise<Query> {
-  return sanitizeQuery(raw, {
-    limitDefault: intVar(env.QUERY_LIMIT_DEFAULT, 100),
-    limitMax: intVar(env.QUERY_LIMIT_MAX, -1),
-    variables: await ctx.req.variables.for(raw),
-  });
+export async function toQuery(_env: Bindings, ctx: ItemsContext, raw: Record<string, unknown>): Promise<Query> {
+  const { limitDefault, limitMax, maxDepth } = ctx.limits;
+  return sanitizeQuery(raw, { limitDefault, limitMax, maxRelationalDepth: maxDepth, variables: await ctx.req.variables.for(raw) });
 }
 
 /** The query from the query string, in JSON or bracket syntax. */

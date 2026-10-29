@@ -114,7 +114,7 @@ describe('filter errors', () => {
     [{ _and: {} }, 'INVALID_QUERY', '"_and" has to be an array of filters'],
     [{ title: { _foo: 1 } }, 'INVALID_QUERY', '"_foo" is not a valid filter operator'],
     [{ title: { _regex: 'a' } }, 'INVALID_QUERY', '"_regex" is not supported'],
-    [{ title: { _some: {} } }, 'INVALID_QUERY', '"_some" can only be used on relational fields'],
+    [{ title: { _some: {} } }, 'INVALID_QUERY', '"_some" can only be used on one-to-many fields'],
     [{ title: { _eq: '' } }, 'INVALID_QUERY', `You can't filter for an empty string in "_eq". Use "_empty" or "_nempty" instead`],
     [{ title: { _eq: { a: 1 } } }, 'INVALID_QUERY', 'The filter value for "_eq" has to be a string, number, or boolean'],
     [{ views: { _eq: 'abc' } }, 'INVALID_QUERY', 'The filter value for "views" must be a number'],
@@ -138,7 +138,8 @@ describe('parameters', () => {
       offset: 20,
     });
     expect(s.sql).toBe(
-      'SELECT "id", "title" FROM "posts" WHERE ("status" = ?1 OR "views" > ?2 OR "body" = ?1) ORDER BY "views" DESC, "id" ASC LIMIT ?2 OFFSET ?3',
+      'SELECT "posts"."id" AS "id", "posts"."title" AS "title" FROM "posts" WHERE ("posts"."status" = ?1 OR "posts"."views" > ?2 OR "posts"."body" = ?1) ' +
+        'ORDER BY "posts"."views" DESC, "posts"."id" ASC LIMIT ?2 OFFSET ?3',
     );
     expect(s.params).toEqual(['published', 10, 20]);
   });

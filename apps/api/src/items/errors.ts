@@ -2,6 +2,15 @@ import { GUARD_TABLE } from '@cirrus/query';
 import { CirrusError, forbidden, invalidPayload } from '@cirrus/shared';
 import { collectionOfTable } from '../system/collections.ts';
 
+/**
+ * Directus InvalidForeignKeyError: a key that references no item, or an item still referenced
+ * (on_delete RESTRICT / NO ACTION), with the field holding the key when it is known.
+ */
+export const invalidForeignKey = (collection?: string, field?: string) =>
+  field
+    ? new CirrusError('INVALID_FOREIGN_KEY', `Invalid foreign key for field "${field}" in collection "${collection}".`, { collection, field })
+    : new CirrusError('INVALID_FOREIGN_KEY', 'Invalid foreign key.');
+
 /** SQLite errors from item writes → Directus errors. Values are checked beforehand, so these are mostly constraints. */
 export function translateItemError(err: unknown): unknown {
   const msg = err instanceof Error ? err.message : String(err);
@@ -23,8 +32,8 @@ export function translateItemError(err: unknown): unknown {
       field,
     });
   }
-  // SQLite doesn't say which key; system collections are the only ones with foreign keys until M4.
-  if (msg.includes('FOREIGN KEY constraint failed')) return new CirrusError('INVALID_FOREIGN_KEY', 'Invalid foreign key.');
+  // The system tables' own foreign keys; SQLite doesn't say which key (user relations are guarded, ADR-021).
+  if (msg.includes('FOREIGN KEY constraint failed')) return invalidForeignKey();
   if ((m = /cannot store \w+ value in (\w+) column \w+\.(\w+)/.exec(msg))) {
     return invalidPayload(`"${m[2]}" can't be stored as ${m[1]}`);
   }

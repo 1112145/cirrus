@@ -148,9 +148,9 @@ describe('reads with access', () => {
   it('compiles CASE once per field and keeps parameters shared', () => {
     const s = selectItems(posts, query({ fields: ['views'], filter: { views: { _gt: 1 } }, sort: ['views'] }), { access: twoPolicies });
     expect(s.sql).toBe(
-      'SELECT (CASE WHEN "author" = ?1 THEN "views" END) AS "views" FROM "posts" WHERE ' +
-        '(("status" = ?2 OR "author" = ?1) AND (CASE WHEN "author" = ?1 THEN "views" END) > ?3) ' +
-        'ORDER BY (CASE WHEN "author" = ?1 THEN "views" END) ASC, "id" ASC',
+      'SELECT (CASE WHEN "posts"."author" = ?1 THEN "posts"."views" END) AS "views" FROM "posts" WHERE ' +
+        '(("posts"."status" = ?2 OR "posts"."author" = ?1) AND (CASE WHEN "posts"."author" = ?1 THEN "posts"."views" END) > ?3) ' +
+        'ORDER BY (CASE WHEN "posts"."author" = ?1 THEN "posts"."views" END) ASC, "posts"."id" ASC',
     );
     expect(s.params).toEqual([AUTHOR, 'published', 1]);
   });

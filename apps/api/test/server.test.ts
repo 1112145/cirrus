@@ -37,6 +37,7 @@ describe('error format', () => {
 describe('system tables', () => {
   const expected = [
     'cirrus_access',
+    'cirrus_batch_keys',
     'cirrus_collections',
     'cirrus_fields',
     'cirrus_files',

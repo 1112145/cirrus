@@ -1,6 +1,7 @@
 import type { ColumnDef, FieldDef, FieldType, TableDef } from '@cirrus/schema';
 import { forbidden, uuidv7 } from '@cirrus/shared';
 import { ACCESS_SQL, type AccessSnapshot, accessFromRows } from '../access/snapshot.ts';
+import { SYSTEM_COLLECTIONS, SYSTEM_RELATIONS } from '../system/collections.ts';
 import {
   COLLECTION_META,
   COLUMN_INPUT,
@@ -16,17 +17,41 @@ export type FieldRecord = FieldDef & {
   id: number;
   collection: string;
   meta: FieldMeta;
-  /** An O2M alias whose nested writes are supported: items of `collection` point back through `field`. System collections only until M4. */
-  o2m?: O2M;
 };
 
-export type O2M = {
+export type NewField = Omit<FieldRecord, 'id'>;
+
+/** What deleting an item does to the items that reference it (the relation's `schema.on_delete`). */
+export const ON_DELETE = ['SET NULL', 'CASCADE', 'RESTRICT', 'NO ACTION', 'SET DEFAULT'] as const;
+export type OnDelete = (typeof ON_DELETE)[number];
+
+/**
+ * A relation (spec §9), as Directus stores it: `collection.field` holds a key of an item of
+ * `related` (the M2O); `oneField` is the alias on `related` listing the items that point at it
+ * (the O2M). M2M is a junction collection with two relations, each naming the other's field as
+ * `junctionField`.
+ */
+export type RelationRecord = {
+  id: number;
+  /** Directus many_collection / many_field. */
   collection: string;
   field: string;
-  /** What happens to related items no longer in the list (Directus one_deselect_action). */
+  /** Directus one_collection (related_collection). */
+  related: string;
+  oneField: string | null;
+  junctionField: string | null;
+  /** Default order of the O2M. */
+  sortField: string | null;
+  /** What a nested O2M write does with the items it no longer lists (one_deselect_action). */
   deselect: 'nullify' | 'delete';
+  /**
+   * The Directus relation schema: null for a relation created with `schema: null`, which nothing
+   * enforces; otherwise keys must reference items and deleting one does this (ADR-021).
+   */
+  onDelete: OnDelete | null;
+  /** Between system collections: their tables' own foreign keys enforce it. */
+  system?: boolean;
 };
-export type NewField = Omit<FieldRecord, 'id'>;
 
 export type CollectionRecord = {
   collection: string;
@@ -42,6 +67,8 @@ export type Schema = {
   version: string;
   /** User collections; system collections (directus_users, …) are defined in code (system/collections.ts). */
   collections: Map<string, CollectionRecord>;
+  /** Relations of user collections; system relations are defined in code (SYSTEM_RELATIONS). */
+  relations: RelationRecord[];
   access: AccessSnapshot;
 };
 
@@ -77,10 +104,11 @@ export const readSchemaVersion = async (db: D1Database) =>
   (await db.prepare(VERSION_SQL).first<{ value: string }>())?.value ?? null;
 
 async function loadSchema(db: D1Database): Promise<Schema> {
-  const [version, collections, fields, ...access] = await db.batch<Row>([
+  const [version, collections, fields, relations, ...access] = await db.batch<Row>([
     db.prepare(VERSION_SQL),
     db.prepare('SELECT * FROM cirrus_collections ORDER BY collection'),
     db.prepare('SELECT * FROM cirrus_fields ORDER BY collection, sort IS NULL, sort, id'),
+    db.prepare('SELECT * FROM cirrus_relations ORDER BY id'),
     ...ACCESS_SQL.map((sql) => db.prepare(sql)),
   ]);
 
@@ -95,9 +123,22 @@ async function loadSchema(db: D1Database): Promise<Schema> {
   return {
     version: version!.results[0]!.value as string,
     collections: map,
+    relations: relations!.results.map(relationFromRow),
     access: accessFromRows(roles!, policies!, accessRows!, permissions!),
   };
 }
+
+const relationFromRow = (row: Row): RelationRecord => ({
+  id: row.id as number,
+  collection: row.many_collection as string,
+  field: row.many_field as string,
+  related: row.one_collection as string,
+  oneField: row.one_field as string | null,
+  junctionField: row.junction_field as string | null,
+  sortField: row.sort_field as string | null,
+  deselect: row.one_deselect_action === 'delete' ? 'delete' : 'nullify',
+  onDelete: row.on_delete as OnDelete | null,
+});
 
 function fieldFromRow(row: Row): FieldRecord {
   const type = row.type as FieldType;
@@ -145,6 +186,25 @@ export const tableOf = (collection: CollectionRecord, fields: readonly FieldDef[
   name: collection.collection,
   fields,
 });
+
+/** A user or system collection; null when there is none by that name. */
+export const anyCollection = (schema: Schema, name: string): CollectionRecord | null =>
+  schema.collections.get(name) ?? SYSTEM_COLLECTIONS.get(name) ?? null;
+
+// Relations ----------------------------------------------------------------------------------
+
+export const allRelations = (schema: Schema): readonly RelationRecord[] => [...SYSTEM_RELATIONS, ...schema.relations];
+
+/** The relation a field holds the key of (its M2O), if any. */
+export const m2oOf = (schema: Schema, collection: string, field: string) =>
+  allRelations(schema).find((r) => r.collection === collection && r.field === field) ?? null;
+
+/** The relation an alias field lists the items of (its O2M), if any. */
+export const o2mOf = (schema: Schema, collection: string, field: string) =>
+  allRelations(schema).find((r) => r.related === collection && r.oneField === field) ?? null;
+
+/** Relations whose items point at items of `collection`. */
+export const relationsTo = (schema: Schema, collection: string) => allRelations(schema).filter((r) => r.related === collection);
 
 // Metadata writes (bound into the same D1 batch as the DDL) --------------------------------
 

@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { commit } from '../src/schema/service.ts';
+import { commit } from '../src/schema/commit.ts';
 import { api, call, firstError, tableColumns, tableIndexes, tableSql } from './helpers.ts';
 
 /** Every test in this file shares one D1 database, so each uses its own collection names. */

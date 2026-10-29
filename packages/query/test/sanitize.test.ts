@@ -18,6 +18,7 @@ describe('sanitizeQuery', () => {
       limit: 100,
       offset: 0,
       meta: [],
+      deep: null,
     });
   });
 

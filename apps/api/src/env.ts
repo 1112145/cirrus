@@ -23,6 +23,8 @@ export type Bindings = {
   QUERY_LIMIT_DEFAULT?: string;
   /** Largest limit a request may ask for; -1 = none (Directus QUERY_LIMIT_MAX). With a maximum, limit=-1 returns that many. */
   QUERY_LIMIT_MAX?: string;
+  /** Most segments a path into relations may have in a query (Directus MAX_RELATIONAL_DEPTH; at least 2). Default 10. */
+  MAX_RELATIONAL_DEPTH?: string;
 };
 
 /** The credential a request presented, before policies are looked up. */

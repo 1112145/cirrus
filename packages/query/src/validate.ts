@@ -30,11 +30,15 @@ type Values = Readonly<Record<string, DbValue>>;
 
 const MAX_DEPTH = 32;
 
-export function validatePayload(c: QueryCollection, filter: Filter, row: Values): ValidationError[] {
-  return check(c, filter, row, 0);
+/**
+ * `unknown` lists fields the payload sets to a value not known yet: the key of an item a nested
+ * write creates with an auto-increment key. They count as set and not null; other rules on them pass.
+ */
+export function validatePayload(c: QueryCollection, filter: Filter, row: Values, unknown: ReadonlySet<string> = new Set()): ValidationError[] {
+  return check(c, filter, row, unknown, 0);
 }
 
-function check(c: QueryCollection, filter: Filter, row: Values, depth: number): ValidationError[] {
+function check(c: QueryCollection, filter: Filter, row: Values, unknown: ReadonlySet<string>, depth: number): ValidationError[] {
   if (depth > MAX_DEPTH) throw invalidQuery('The validation rule is nested too deeply');
   const errors: ValidationError[] = [];
   for (const [key, value] of Object.entries(filter)) {
@@ -42,28 +46,33 @@ function check(c: QueryCollection, filter: Filter, row: Values, depth: number): 
       if (!Array.isArray(value)) throw invalidQuery(`"${key}" has to be an array of filters`);
       const results = value.map((sub, i) => {
         if (!isPlainObject(sub)) throw invalidQuery(`"${key}[${i}]" has to be a filter object`);
-        return check(c, sub, row, depth + 1);
+        return check(c, sub, row, unknown, depth + 1);
       });
       if (key === '_and' || (results.length > 0 && results.every((r) => r.length > 0))) errors.push(...results.flat());
     } else if (key.startsWith('_')) {
       throw invalidQuery(`"${key}" has to be used on a field`);
     } else {
-      errors.push(...checkField(c, key, value, row));
+      errors.push(...checkField(c, key, value, row, unknown));
     }
   }
   return errors;
 }
 
-function checkField(c: QueryCollection, name: string, rule: unknown, row: Values): ValidationError[] {
+function checkField(c: QueryCollection, name: string, rule: unknown, row: Values, unknown: ReadonlySet<string>): ValidationError[] {
   const ops: Array<[string, unknown]> = isPlainObject(rule) ? Object.entries(rule) : [['_eq', rule]];
-  const present = Object.hasOwn(row, name);
+  const pending = unknown.has(name);
+  const present = pending || Object.hasOwn(row, name);
   const f = c.fields.find((x) => x.field === name && x.type !== 'alias');
   const errors: ValidationError[] = [];
   for (const [op, v] of ops) {
-    // Paths into relations arrive with M4; until then such rules can't fail.
+    // Like Directus, rules only see the payload: paths into related items can't fail.
     if (!op.startsWith('_')) continue;
     if (op === '_submitted') {
       if (flag(op, v) && !present) errors.push({ field: name, type: 'required' });
+      continue;
+    }
+    if (pending) {
+      if (op === '_null' && flag(op, v)) errors.push({ field: name, type: 'null' });
       continue;
     }
     if (!present || !f) continue;
@@ -158,7 +167,7 @@ function checkOperator(f: QueryField, op: string, v: unknown, actual: DbValue): 
   }
 
   if (['_intersects', '_nintersects', '_intersects_bbox', '_nintersects_bbox'].includes(op)) throw invalidQuery(`"${op}" is not supported`);
-  if (op === '_some' || op === '_none') throw invalidQuery(`"${op}" can only be used on relational fields`);
+  if (op === '_some' || op === '_none') throw invalidQuery(`"${op}" can only be used on one-to-many fields`);
   throw invalidQuery(`"${op}" is not a valid filter operator`);
 }
 

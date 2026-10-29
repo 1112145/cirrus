@@ -159,7 +159,8 @@ export const toDirectusCollection = (c: CollectionRecord) => ({
   schema: c.folder ? null : { name: c.collection, comment: null },
 });
 
-export function toDirectusField(f: FieldRecord) {
+/** `foreignKey`: the related table and key an M2O field references, when Cirrus enforces it (spec §9). */
+export function toDirectusField(f: FieldRecord, foreignKey: { table: string; column: string } | null = null) {
   const col = f.column;
   return {
     collection: f.collection,
@@ -181,8 +182,8 @@ export function toDirectusField(f: FieldRecord) {
       is_indexed: col.indexed,
       is_primary_key: col.primaryKey,
       has_auto_increment: col.autoIncrement,
-      foreign_key_column: null,
-      foreign_key_table: null,
+      foreign_key_column: foreignKey?.column ?? null,
+      foreign_key_table: foreignKey?.table ?? null,
       comment: null,
     },
   };
