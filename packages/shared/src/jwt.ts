@@ -73,8 +73,15 @@ export function decodeJwt(token: string): JwtPayload | null {
   }
 }
 
-/** Check the signature (HS256 only), the issuer and the expiry, then return the payload. Throws JwtError. */
-export async function verifyJwt(token: string, secret: string, opts: { issuer: string; now?: number }): Promise<JwtPayload> {
+/**
+ * Check the signature (HS256 only), the issuer and the expiry (unless `ignoreExpiration`), then
+ * return the payload. Throws JwtError.
+ */
+export async function verifyJwt(
+  token: string,
+  secret: string,
+  opts: { issuer: string; now?: number; ignoreExpiration?: boolean },
+): Promise<JwtPayload> {
   const parts = token.split('.');
   if (parts.length !== 3) throw new JwtError('invalid');
   const [header, body, signature] = parts as [string, string, string];
@@ -87,6 +94,6 @@ export async function verifyJwt(token: string, secret: string, opts: { issuer: s
   const payload: JwtPayload = decodePart(body);
   if (payload.iss !== opts.issuer) throw new JwtError('invalid');
   if (typeof payload.exp !== 'number') throw new JwtError('invalid');
-  if (payload.exp * 1000 <= (opts.now ?? Date.now())) throw new JwtError('expired');
+  if (!opts.ignoreExpiration && payload.exp * 1000 <= (opts.now ?? Date.now())) throw new JwtError('expired');
   return payload;
 }

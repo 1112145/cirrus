@@ -22,6 +22,10 @@
     "REFRESH_TOKEN_TTL": "7d",
     "REFRESH_TOKEN_COOKIE_SECURE": "true",
     "REFRESH_TOKEN_COOKIE_SAME_SITE": "lax",
+    // `session` mode logins (the admin app): the access token in an httpOnly cookie, for this long.
+    "SESSION_COOKIE_TTL": "1d",
+    "SESSION_COOKIE_SECURE": "true",
+    "SESSION_COOKIE_SAME_SITE": "lax",
     // Files (spec §11), with Directus' names: the MIME types uploads may have. FILES_MAX_UPLOAD_SIZE
     // (e.g. "100mb") caps each upload; unset, the plan's request size limit does.
     "FILES_MIME_TYPE_ALLOW_LIST": "*/*",
@@ -46,7 +50,15 @@
   "r2_buckets": [{ "binding": "STORAGE", "bucket_name": "cirrus-files" }],
 
   // Cloudflare Images, for asset transformations (`/assets/:id?width=…`). Remove it to turn them off.
-  "images": { "binding": "IMAGES" }
+  "images": { "binding": "IMAGES" },
+
+  "assets": {
+    "directory": "../admin/dist",
+    "binding": "ASSETS",
+    "base_path": "/admin",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/*", "!/admin/*"]
+  }
 
   // Secrets (`wrangler secret put <name>`; locally in .dev.vars):
   // SECRET: signs access tokens; without it nobody can log in

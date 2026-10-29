@@ -38,6 +38,8 @@ describe('JWT', () => {
     const now = Date.UTC(2026, 0, 1);
     const token = await signJwt({ id: 'u1' }, SECRET, { expiresIn: 60, issuer: ISS, now });
     expect(await reason(verifyJwt(token, SECRET, { issuer: ISS, now: now + 60_000 }))).toBe('expired');
+    expect((await verifyJwt(token, SECRET, { issuer: ISS, now: now + 60_000, ignoreExpiration: true })).id).toBe('u1');
+    expect(await reason(verifyJwt(token, 'other', { issuer: ISS, now: now + 60_000, ignoreExpiration: true }))).toBe('invalid');
     expect(await reason(verifyJwt(token, 'other', { issuer: ISS, now }))).toBe('invalid');
     expect(await reason(verifyJwt(token, SECRET, { issuer: 'other', now }))).toBe('invalid');
 

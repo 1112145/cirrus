@@ -8,7 +8,11 @@
   },
   "scripts": {
     "dev": "pnpm --filter @cirrus/api dev",
+    "dev:admin": "pnpm --filter @cirrus/admin dev",
+    "build": "pnpm --filter @cirrus/admin build",
+    "deploy": "pnpm --filter @cirrus/api run deploy",
     "test": "pnpm -r test",
+    "test:e2e": "pnpm --filter @cirrus/admin test:e2e",
     "typecheck": "pnpm -r typecheck",
     "db:migrate:local": "pnpm --filter @cirrus/api db:migrate:local"
   }

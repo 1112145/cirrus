@@ -4,6 +4,8 @@ export type Bindings = {
   STORAGE?: R2Bucket;
   /** Cloudflare Images, for asset transformations (`/assets/:id?width=…`). Optional: without it, they're refused. */
   IMAGES?: ImagesBinding;
+  /** The admin app's static assets, served under /admin/ before the Worker runs (spec §13). */
+  ASSETS?: Fetcher;
   PROJECT_NAME: string;
   DEFAULT_LANGUAGE: string;
   /**
@@ -23,6 +25,14 @@ export type Bindings = {
   REFRESH_TOKEN_COOKIE_SAME_SITE?: string;
   /** Domain of the refresh token cookie (Directus REFRESH_TOKEN_COOKIE_DOMAIN). */
   REFRESH_TOKEN_COOKIE_DOMAIN?: string;
+  /** Lifetime of `session` mode logins, e.g. "1d" (Directus SESSION_COOKIE_TTL): the session cookie and its session. */
+  SESSION_COOKIE_TTL?: string;
+  /** Mark the session cookie Secure: "true" / "false" (Directus SESSION_COOKIE_SECURE). */
+  SESSION_COOKIE_SECURE?: string;
+  /** SameSite of the session cookie: lax, strict or none (Directus SESSION_COOKIE_SAME_SITE). */
+  SESSION_COOKIE_SAME_SITE?: string;
+  /** Domain of the session cookie (Directus SESSION_COOKIE_DOMAIN). */
+  SESSION_COOKIE_DOMAIN?: string;
   /** Items returned when a request sets no limit (Directus QUERY_LIMIT_DEFAULT). Default 100. */
   QUERY_LIMIT_DEFAULT?: string;
   /** Largest limit a request may ask for; -1 = none (Directus QUERY_LIMIT_MAX). With a maximum, limit=-1 returns that many. */
