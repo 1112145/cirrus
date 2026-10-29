@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import type { AppEnv } from './env.ts';
 import { authenticate } from './middleware/auth.ts';
 import { notFound, onError } from './middleware/errors.ts';
@@ -29,6 +29,11 @@ app.route('/access', access);
 app.route('/files', files);
 app.route('/folders', folders);
 app.route('/assets', assets);
+
+// The admin app is served from Workers Static Assets under /admin/ (spec §13); the bare paths lead there, as in Directus.
+const toAdmin = (c: Context<AppEnv>) => (c.env.ASSETS ? c.redirect('/admin/', 302) : c.notFound());
+app.get('/', toAdmin);
+app.get('/admin', toAdmin);
 
 app.notFound(notFound);
 app.onError(onError);

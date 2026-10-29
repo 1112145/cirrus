@@ -752,3 +752,44 @@ describe('@directus/sdk contract — M5', () => {
     expect(await admin.request(readFolders())).toEqual([]);
   });
 });
+
+describe('@directus/sdk contract — M6', () => {
+  /** fetch with a cookie jar, as the browser running the admin app keeps one. */
+  function browserFetch() {
+    const jar = new Map<string, string>();
+    const fetchWithCookies: typeof fetch = async (input, init) => {
+      const req = new Request(input, init);
+      if (jar.size) req.headers.set('Cookie', [...jar].map(([k, v]) => `${k}=${v}`).join('; '));
+      const res = await workerFetch(req);
+      for (const header of res.headers.getSetCookie()) {
+        const [pair, ...attrs] = header.split(';');
+        const [name, value] = pair!.split('=') as [string, string];
+        if (!value || attrs.some((a) => /^\s*max-age=0\s*$/i.test(a))) jar.delete(name);
+        else jar.set(name, value);
+      }
+      return res;
+    };
+    return { jar, fetch: fetchWithCookies };
+  }
+
+  it("authentication('session'): login(), readMe(), refresh(), logout()", async () => {
+    const id = (await admin.request(createUser({ email: 'sdk-session@example.com', password: 'session password', role: ADMIN_ROLE }))).id;
+    const browser = browserFetch();
+    const app = createDirectus(BASE, { globals: { fetch: browser.fetch } })
+      .with(authentication('session', { credentials: 'include', autoRefresh: false }))
+      .with(rest({ credentials: 'include' }));
+
+    expect(await app.login({ email: 'sdk-session@example.com', password: 'session password' })).toMatchObject({ expires: 86_400_000 });
+    expect(browser.jar.has('directus_session_token')).toBe(true);
+    // No token for the client to hold: the cookie authenticates.
+    expect(await app.getToken()).toBeNull();
+    expect(await app.request(readMe({ fields: ['id'] }))).toEqual({ id });
+
+    expect(await app.refresh()).toMatchObject({ expires: 86_400_000 });
+    expect((await app.request(readMe({ fields: ['id'] }))).id).toBe(id);
+
+    await app.logout();
+    expect(browser.jar.has('directus_session_token')).toBe(false);
+    expect(await errorCode(app.request(readMe()))).toBe('INVALID_CREDENTIALS');
+  });
+});

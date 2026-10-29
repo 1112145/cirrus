@@ -24,6 +24,16 @@ describe('/server', () => {
   });
 });
 
+describe('admin app', () => {
+  it('the root and /admin lead to /admin/, where the static assets serve it', async () => {
+    for (const path of ['/', '/admin']) {
+      const res = await call(path, { redirect: 'manual' });
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe('/admin/');
+    }
+  });
+});
+
 describe('error format', () => {
   it('unknown route → Directus-style ROUTE_NOT_FOUND', async () => {
     const res = await call('/nope');

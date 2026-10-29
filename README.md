@@ -3,17 +3,23 @@
 A Directus-style headless CMS that runs entirely on Cloudflare (Workers + Hono, D1, R2, KV, Durable Objects, Queues).
 Its REST API is compatible with `@directus/sdk` 21.3.0 (Directus 11.17.4). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design.
 
-> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging), M3 (auth: login, roles, policies, permissions down to rows and fields), M4 (relations: M2O, O2M, M2M, nested fields, relational filters, `deep`, nested writes, `on_delete`) and M5 (files: uploads streamed into R2, folders, assets with Range, cache headers and image transformations) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
+> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging), M3 (auth: login, roles, policies, permissions down to rows and fields), M4 (relations: M2O, O2M, M2M, nested fields, relational filters, `deep`, nested writes, `on_delete`) M5 (files: uploads streamed into R2, folders, assets with Range, cache headers and image transformations) and M6 (the admin app: data model, content and file library in the browser) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
 
 ## Layout
 
 ```
+apps/admin/          Vue 3 admin app, served by the Worker under /admin
+  src/views/         screens: login, content (lists, item forms), file library, data model
+  src/components/    the form inputs (relations, files, tags, …), pickers, dialogs, layout
+  src/lib/           pure logic: Directus schema shapes, value conversions, display templates, data model plans
+  src/stores/        session, data model and permissions, notifications
+  test/              unit tests (Vitest); e2e/ end-to-end tests (Playwright against wrangler dev)
 apps/api/            Hono Worker
   src/routes/        HTTP endpoints (/server, /auth, /collections, /fields, /relations, /items, /users, /roles, /policies, /permissions, /access, /files, /folders, /assets)
   src/schema/        schema snapshot, Directus payload mapping, schema-change service, relations
   src/items/         items service: payload processing, permission checks, reads, writes, nested writes, on_delete
   src/access/        roles/policies/permissions snapshot, the policies of a request, app access permissions
-  src/auth/          login, refresh and logout (JWT access tokens, rotating refresh tokens)
+  src/auth/          login, refresh and logout (JWT access tokens, rotating refresh tokens, session cookies)
   src/files/         uploads into R2, imports, replacing and deleting contents, assets and image transformations
   src/system/        system collections (directus_users, …) over the cirrus_* tables
   src/middleware/    authentication (tokens), JSON body, Directus error format
@@ -27,7 +33,7 @@ packages/files/      streaming multipart parser, image dimensions and Exif, MIME
 docs/                architecture and decision log
 ```
 
-`packages/sdk` and `apps/admin` (M6) are added when their milestone starts.
+`packages/sdk` is added when its milestone starts.
 
 ## Getting started
 
@@ -37,13 +43,13 @@ Requires Node 22+ and pnpm 10.
 pnpm install
 pnpm db:migrate:local      # create the system tables in local D1
 printf 'SECRET=dev-secret\nADMIN_TOKEN=dev-admin-token\n' > apps/api/.dev.vars
-pnpm dev                   # http://localhost:8787/server/ping → pong
+pnpm dev                   # builds the admin app, then http://localhost:8787/server/ping → pong
 pnpm test                  # unit + contract tests
 pnpm typecheck
 ```
 
 `SECRET` signs access tokens. `ADMIN_TOKEN` is a static admin token: use it to create the first user, with the
-Administrator role the migrations seed:
+Administrator role the migrations seed, then sign in to the admin app at http://localhost:8787/admin:
 
 ```bash
 curl -X POST http://localhost:8787/users \
@@ -54,7 +60,20 @@ curl -X POST http://localhost:8787/auth/login -H 'Content-Type: application/json
 # → { "data": { "access_token": "…", "refresh_token": "…", "expires": 900000 } }
 ```
 
-Then use the access token (or the SDK: `createDirectus(url).with(authentication('json')).with(rest())`, then `login({ email, password })`).
+### Admin app
+
+http://localhost:8787/admin manages everything below without curl: collections and their fields (text, numbers,
+dropdowns, dates, JSON, images and files, many to one, one to many, many to many), their items, and the file
+library. Users with app access see the collections their permissions allow; the data model is for admins.
+
+```bash
+pnpm dev:admin             # Vite with hot reload on http://localhost:5173/admin/, using the API of `pnpm dev`
+pnpm test:e2e              # Playwright in Chromium against wrangler dev (once: pnpm --filter @cirrus/admin exec playwright install chromium)
+```
+
+### API
+
+Use the access token (or the SDK: `createDirectus(url).with(authentication('json')).with(rest())`, then `login({ email, password })`).
 Create a collection:
 
 ```bash
@@ -121,8 +140,11 @@ npx wrangler r2 bucket create cirrus-files
 pnpm db:migrate:remote
 npx wrangler secret put SECRET         # a long random string; it signs access tokens
 npx wrangler secret put ADMIN_TOKEN    # optional: another long random string, to create the first users
-pnpm deploy
+pnpm run deploy                        # builds the admin app, then deploys the Worker with it
 ```
+
+The admin app is then at `https://<your worker>/admin`. Its session cookie is `Secure`: serve it over HTTPS (as
+workers.dev and custom domains are), or set `SESSION_COOKIE_SECURE` to `false` for plain HTTP.
 
 Asset transformations use [Cloudflare Images](https://developers.cloudflare.com/images/transform-images/bindings/)
 through the `IMAGES` binding (billed per transformation beyond the free allowance; each variant is made once and kept
@@ -146,6 +168,9 @@ in R2). Remove the binding from `wrangler.jsonc` to turn them off.
   record write fails; deleting or replacing a file deletes the old contents (and their variants) after the batch.
   `filename_disk` is the server's: requests can't set it.
 - Every new endpoint needs a contract test in `apps/api/test/contract/`.
+- The admin app talks to the API only through `@directus/sdk` (`request()` in `apps/admin/src/api.ts`), like any
+  client; lists read `meta.filter_count` with `readPage()`, as the SDK drops `meta`. Data model changes are plans of
+  API calls (`apps/admin/src/lib/builder.ts`), tested against the Worker in `apps/api/test/admin-plans.test.ts`.
 - `compatibility_date` in `wrangler.jsonc` must not exceed the date supported by the workerd bundled with `@cloudflare/vitest-plugin`.
 
 ## Roadmap
@@ -158,5 +183,5 @@ in R2). Remove the binding from `wrangler.jsonc` to turn them off.
 | M3 – Auth & RBAC | ✅ |
 | M4 – Relations | ✅ |
 | M5 – Files | ✅ |
-| M6 – Admin UI MVP | ⏳ |
+| M6 – Admin UI MVP | ✅ |
 | M7+ – Extensions | |
