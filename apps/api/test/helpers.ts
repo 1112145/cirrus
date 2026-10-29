@@ -40,3 +40,29 @@ export const tableIndexes = async (name: string) =>
   ).results.map((r) => r.name);
 
 export { BASE };
+
+/** JSON body of a 200 response; shows the error body when the status differs. */
+export async function ok<T = any>(res: Response): Promise<{ data: T; meta?: Record<string, number> }> {
+  const text = await res.text();
+  if (res.status !== 200) throw new Error(`Expected 200, got ${res.status}: ${text}`);
+  return JSON.parse(text);
+}
+
+/** Status and error extensions of an error response. */
+export const errorOf = async (res: Response) => ({ status: res.status, ...(await firstError(res)).extensions });
+
+/** The Administrator role seeded by migration 0003. */
+export const ADMIN_ROLE = '01a1857c-54d5-7148-8495-9e81c8a7caa5';
+/** The public policy seeded by migration 0003 (Directus' id). */
+export const PUBLIC_POLICY = 'abf8a154-5b1c-4a46-ac9c-7300570f4f17';
+
+/** Create a user as admin; returns its id. */
+export const createUser = async (user: Record<string, unknown>) => (await ok<{ id: string }>(await api('POST', '/users', user))).data.id;
+
+/** Log in (json mode); returns the token pair. */
+export async function login(email: string, password: string) {
+  const { data } = await ok<{ access_token: string; refresh_token: string; expires: number }>(
+    await api('POST', '/auth/login', { email, password, mode: 'json' }, null),
+  );
+  return data;
+}

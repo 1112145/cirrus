@@ -1,22 +1,29 @@
 import { Hono } from 'hono';
 import type { AppEnv } from './env.ts';
-import { accountability } from './middleware/auth.ts';
+import { authenticate } from './middleware/auth.ts';
 import { notFound, onError } from './middleware/errors.ts';
+import { auth } from './routes/auth.ts';
 import { collections } from './routes/collections.ts';
 import { fields } from './routes/fields.ts';
 import { items } from './routes/items.ts';
 import { server } from './routes/server.ts';
+import { access, permissions, policies, roles, users } from './routes/system.ts';
 
 const app = new Hono<AppEnv>();
 
-app.use('*', accountability);
+app.use('*', authenticate);
 
 app.route('/server', server);
+app.route('/auth', auth);
 app.route('/collections', collections);
 app.route('/fields', fields);
 app.route('/items', items);
+app.route('/users', users);
+app.route('/roles', roles);
+app.route('/policies', policies);
+app.route('/permissions', permissions);
+app.route('/access', access);
 
-// M3: /auth, /users, /roles, /policies, /permissions
 // M4: /relations
 // M5: /files, /assets
 

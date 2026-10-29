@@ -54,9 +54,10 @@ beforeAll(async () => {
 });
 
 describe('access', () => {
-  it('needs admin until permissions exist (M3)', async () => {
-    expect(await errorOf(await api('GET', '/items/articles', undefined, null))).toEqual({ status: 403, code: 'FORBIDDEN' });
-    expect(await errorOf(await api('POST', '/items/articles', { title: 'x' }, null))).toEqual({ status: 403, code: 'FORBIDDEN' });
+  it('is FORBIDDEN without a permission (the public policy starts with none)', async () => {
+    const reason = (action: string) => `You don't have permission to "${action}" from collection "articles" or it does not exist.`;
+    expect(await errorOf(await api('GET', '/items/articles', undefined, null))).toEqual({ status: 403, code: 'FORBIDDEN', reason: reason('read') });
+    expect(await errorOf(await api('POST', '/items/articles', { title: 'x' }, null))).toEqual({ status: 403, code: 'FORBIDDEN', reason: reason('create') });
   });
 
   it('answers FORBIDDEN for collections without items', async () => {

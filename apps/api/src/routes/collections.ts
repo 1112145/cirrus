@@ -1,11 +1,13 @@
-import { invalidPayload } from '@cirrus/shared';
+import { forbidden, invalidPayload } from '@cirrus/shared';
 import { Hono } from 'hono';
+import { readableFields } from '../access/visibility.ts';
 import type { AppEnv } from '../env.ts';
-import { isAdmin, requireAdmin } from '../middleware/auth.ts';
+import { requireAdmin } from '../middleware/auth.ts';
 import { readJson } from '../middleware/body.ts';
 import { toDirectusCollection } from '../schema/directus.ts';
 import { isPlainObject } from '../schema/meta.ts';
 import { createCollections, deleteCollection, updateCollections } from '../schema/service.ts';
+import { requestContext } from '../request.ts';
 import { getCollection, getSchema } from '../schema/store.ts';
 
 /** SDK: readCollections, readCollection, createCollection, updateCollection, updateCollectionsBatch, deleteCollection */
@@ -16,16 +18,18 @@ const read = async (db: D1Database, names: string[]) => {
   return names.map((n) => toDirectusCollection(getCollection(schema, n)));
 };
 
+// Non-admins see the collections they may read (folders only to admins).
 collections.get('/', async (c) => {
-  // Non-admins see the collections they have permissions on (M3); for now that is none.
-  if (!isAdmin(c)) return c.json({ data: [] });
-  const schema = await getSchema(c.env.DB);
-  return c.json({ data: [...schema.collections.values()].map(toDirectusCollection) });
+  const req = await requestContext(c);
+  const visible = [...req.schema.collections.values()].filter((col) => readableFields(req, col) !== null);
+  return c.json({ data: visible.map(toDirectusCollection) });
 });
 
-collections.get('/:collection', requireAdmin, async (c) => {
-  const [data] = await read(c.env.DB, [c.req.param('collection')]);
-  return c.json({ data });
+collections.get('/:collection', async (c) => {
+  const req = await requestContext(c);
+  const col = getCollection(req.schema, c.req.param('collection'));
+  if (readableFields(req, col) === null) throw forbidden();
+  return c.json({ data: toDirectusCollection(col) });
 });
 
 collections.post('/', requireAdmin, async (c) => {

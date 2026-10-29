@@ -3,22 +3,25 @@
 A Directus-style headless CMS that runs entirely on Cloudflare (Workers + Hono, D1, R2, KV, Durable Objects, Queues).
 Its REST API is compatible with `@directus/sdk` 21.3.0 (Directus 11.17.4). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design.
 
-> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields) and M2 (items: CRUD with filter, sort, fields, search and paging) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
+> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging) and M3 (auth: login, roles, policies, permissions down to rows and fields) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
 
 ## Layout
 
 ```
 apps/api/            Hono Worker
-  src/routes/        HTTP endpoints (/server, /collections, /fields, /items)
+  src/routes/        HTTP endpoints (/server, /auth, /collections, /fields, /items, /users, /roles, /policies, /permissions, /access)
   src/schema/        schema snapshot, Directus payload mapping, schema-change service
-  src/items/         items service: payload processing (field specials, hashing), reads and writes
-  src/middleware/    auth (admin token), JSON body, Directus error format
+  src/items/         items service: payload processing, permission checks, reads, writes, nested writes
+  src/access/        roles/policies/permissions snapshot, the policies of a request, app access permissions
+  src/auth/          login, refresh and logout (JWT access tokens, rotating refresh tokens)
+  src/system/        system collections (directus_users, …) over the cirrus_* tables
+  src/middleware/    authentication (tokens), JSON body, Directus error format
   migrations/        D1 migrations for the system tables (cirrus_*)
   test/              tests running inside workerd; test/contract/ uses the real @directus/sdk
   wrangler.jsonc
-packages/shared/     Directus-style error codes, UUIDv7, PBKDF2 hashing
+packages/shared/     Directus-style error codes, UUIDv7, PBKDF2 hashing, JWT, tokens, IP ranges
 packages/schema/     field types → SQLite, value codecs, DDL generator, migration planner (pure)
-packages/query/      Directus query parsing, filter → SQL compiler, item statements (pure)
+packages/query/      Directus query parsing, filter → SQL compiler with permissions, item statements, payload validation (pure)
 docs/                architecture and decision log
 ```
 
@@ -31,31 +34,47 @@ Requires Node 22+ and pnpm 10.
 ```bash
 pnpm install
 pnpm db:migrate:local      # create the system tables in local D1
-echo 'ADMIN_TOKEN=dev-admin-token' > apps/api/.dev.vars
+printf 'SECRET=dev-secret\nADMIN_TOKEN=dev-admin-token\n' > apps/api/.dev.vars
 pnpm dev                   # http://localhost:8787/server/ping → pong
 pnpm test                  # unit + contract tests
 pnpm typecheck
 ```
 
-Create a collection (schema endpoints need the admin token until auth lands in M3):
+`SECRET` signs access tokens. `ADMIN_TOKEN` is a static admin token: use it to create the first user, with the
+Administrator role the migrations seed:
+
+```bash
+curl -X POST http://localhost:8787/users \
+  -H 'Authorization: Bearer dev-admin-token' -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"change me","role":"01a1857c-54d5-7148-8495-9e81c8a7caa5"}'
+curl -X POST http://localhost:8787/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"change me","mode":"json"}'
+# → { "data": { "access_token": "…", "refresh_token": "…", "expires": 900000 } }
+```
+
+Then use the access token (or the SDK: `createDirectus(url).with(authentication('json')).with(rest())`, then `login({ email, password })`).
+Create a collection:
 
 ```bash
 curl -X POST http://localhost:8787/collections \
-  -H 'Authorization: Bearer dev-admin-token' -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"collection":"posts","schema":{},"fields":[{"field":"title","type":"string"}]}'
 ```
 
-then work with its items (also admin-only until M3):
+then work with its items:
 
 ```bash
 curl -X POST http://localhost:8787/items/posts \
-  -H 'Authorization: Bearer dev-admin-token' -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '[{"title":"Hello"},{"title":"World"}]'
 curl -g 'http://localhost:8787/items/posts?filter[title][_icontains]=hello&sort=-title&meta=*' \
-  -H 'Authorization: Bearer dev-admin-token'
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-or with the SDK: `createDirectus(url).with(staticToken(token)).with(rest())`, then `readItems('posts', { filter: … })`.
+Non-admins need permissions: create a policy with `/policies` and `/permissions` (row filters such as
+`{ "author": { "_eq": "$CURRENT_USER" } }`, allowed fields, validation, presets), attach it to a role or a user
+(`/roles` with `policies: [{ "policy": "<id>" }]`, or `/access`), and give users that role. Requests without a
+token get the public policy, which starts with no permissions.
 
 ## First deploy
 
@@ -63,7 +82,8 @@ or with the SDK: `createDirectus(url).with(staticToken(token)).with(rest())`, th
 cd apps/api
 npx wrangler d1 create cirrus          # copy the database_id into wrangler.jsonc
 pnpm db:migrate:remote
-npx wrangler secret put ADMIN_TOKEN    # a long random string; without it nobody can change the schema
+npx wrangler secret put SECRET         # a long random string; it signs access tokens
+npx wrangler secret put ADMIN_TOKEN    # optional: another long random string, to create the first users
 pnpm deploy
 ```
 
@@ -74,6 +94,9 @@ pnpm deploy
 - Never build SQL from input strings: identifiers must match metadata, values are always bind parameters. The one exception is DDL defaults, which SQLite can't bind; they go through `defaultSql()` in `@cirrus/schema`.
 - Item SQL comes from `@cirrus/query` and must respect D1's limits (spec §8.5): numbered parameters through `Params` (at most 100), lists as one JSON parameter read with `json_each()`, no `LIKE`/`GLOB`.
 - Schema changes go through `commit()` in `apps/api/src/schema/service.ts`: one atomic D1 batch that also swaps `schema_version`.
+- Items reads and writes go through `apps/api/src/items/service.ts`, which applies the request's permissions; system collections (`directus_users`, …) are defined in `apps/api/src/system/collections.ts` and use the same service.
+- A write that must check rows first (permissions, nested writes) puts a guard statement (`guardItems()` in `@cirrus/query`) before itself in the same batch, so D1 rolls everything back when a row doesn't qualify.
+- Writes to roles, policies, access and permissions replace `schema_version`, so every isolate reloads the snapshot.
 - Every new endpoint needs a contract test in `apps/api/test/contract/`.
 - `compatibility_date` in `wrangler.jsonc` must not exceed the date supported by the workerd bundled with `@cloudflare/vitest-plugin`.
 
@@ -84,8 +107,8 @@ pnpm deploy
 | M0 – Scaffold | ✅ |
 | M1 – Schema (collections/fields) | ✅ |
 | M2 – Items | ✅ |
-| M3 – Auth & RBAC | ⏳ |
-| M4 – Relations | |
+| M3 – Auth & RBAC | ✅ |
+| M4 – Relations | ⏳ |
 | M5 – Files | |
 | M6 – Admin UI MVP | |
 | M7+ – Extensions | |

@@ -6,7 +6,7 @@ export const server = new Hono<AppEnv>();
 // SDK: serverPing() — Directus responds with the text "pong"
 server.get('/ping', (c) => c.text('pong'));
 
-// SDK: serverInfo() — public part; once auth lands (M3), admins get more fields
+// SDK: serverInfo() — the public part; Directus adds server details for admins, which Cirrus doesn't report yet
 server.get('/info', (c) =>
   c.json({
     data: {

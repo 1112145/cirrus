@@ -13,7 +13,12 @@
     // Items per request when none is asked for, and the most a request may ask for (-1 = no maximum).
     // Keep the maximum modest: every row is serialized within the Worker's CPU and memory limits.
     "QUERY_LIMIT_DEFAULT": "100",
-    "QUERY_LIMIT_MAX": "1000"
+    "QUERY_LIMIT_MAX": "1000",
+    // Auth (spec §10), with Directus' names: access token and refresh token lifetimes, and the refresh token cookie.
+    "ACCESS_TOKEN_TTL": "15m",
+    "REFRESH_TOKEN_TTL": "7d",
+    "REFRESH_TOKEN_COOKIE_SECURE": "true",
+    "REFRESH_TOKEN_COOKIE_SAME_SITE": "lax"
   },
 
   // database_id: replace with the real ID after running `wrangler d1 create cirrus`
@@ -27,7 +32,8 @@
   ]
 
   // Secrets (`wrangler secret put <name>`; locally in .dev.vars):
-  // ADMIN_TOKEN: static admin token for the schema endpoints until auth lands (M3)
+  // SECRET: signs access tokens; without it nobody can log in
+  // ADMIN_TOKEN: optional static admin token, to create the first users (and as a way back in)
 
   // Added in later milestones:
   // M5: r2_buckets STORAGE

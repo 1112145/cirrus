@@ -1,6 +1,6 @@
 import { createTableSql, type FieldDef, type TableDef } from '@cirrus/schema';
 import { DatabaseSync } from 'node:sqlite';
-import { insertItems, type QueryCollection, type Row, type Statement } from '../src/index.ts';
+import { GUARD_TABLE, insertItems, type QueryCollection, type Row, type Statement } from '../src/index.ts';
 
 const col = (over: Partial<NonNullable<FieldDef['column']>> = {}) => ({
   primaryKey: false,
@@ -57,6 +57,7 @@ export function database() {
   const db = new DatabaseSync(':memory:');
   const table: TableDef = { name: 'posts', fields };
   db.exec(createTableSql(table));
+  db.exec(`CREATE TABLE ${GUARD_TABLE} (ok INTEGER CONSTRAINT ${GUARD_TABLE} CHECK (ok = 1))`);
   const run = (s: Statement) => db.prepare(s.sql).all(...s.params) as Array<Record<string, unknown>>;
   for (const s of insertItems(posts, seed)) run(s);
   return { db, run };
