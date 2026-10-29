@@ -19,8 +19,11 @@ export const ERROR_STATUS = {
   VALUE_TOO_LONG: 400,
   NOT_NULL_VIOLATION: 400,
   RECORD_NOT_UNIQUE: 400,
+  ILLEGAL_ASSET_TRANSFORMATION: 400,
   ROUTE_NOT_FOUND: 404,
+  CONTENT_TOO_LARGE: 413,
   UNSUPPORTED_MEDIA_TYPE: 415,
+  RANGE_NOT_SATISFIABLE: 416,
   REQUESTS_EXCEEDED: 429,
   INTERNAL_SERVER_ERROR: 500,
   SERVICE_UNAVAILABLE: 503,
@@ -87,6 +90,9 @@ export const invalidQuery = (reason: string) =>
  */
 export const forbidden = (reason?: string) =>
   new CirrusError('FORBIDDEN', "You don't have permission to access this.", reason ? { reason } : {});
+
+/** Directus ContentTooLargeError: an upload over FILES_MAX_UPLOAD_SIZE. */
+export const contentTooLarge = () => new CirrusError('CONTENT_TOO_LARGE', 'Uploaded content is too large.');
 
 /** Directus RouteNotFoundError. */
 export const routeNotFound = (path: string) => new CirrusError('ROUTE_NOT_FOUND', `Route ${path} doesn't exist.`, { path });

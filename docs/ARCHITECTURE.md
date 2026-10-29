@@ -39,6 +39,7 @@
 | Node.js + Express | Workers + **Hono** |
 | PostgreSQL/MySQL | **D1** (SQLite) |
 | Storage adapters | **R2** |
+| Image transformations (sharp) | **Cloudflare Images** binding (ADR-025) |
 | Cache (Redis) | **KV** (+ Cache API) |
 | Flows / hooks | **Queues** (async), middleware (sync) |
 | WebSockets / realtime | **Durable Objects** (WebSocket Hibernation) |
@@ -81,6 +82,7 @@ cirrus/
    ├─ shared/         # Directus error codes, UUIDv7, types, zod schemas, filter DSL types
    ├─ query/          # query parsing, filter → SQL builder, item statements (pure; tests run the SQL on node:sqlite) — M2
    ├─ schema/         # type mapping, DDL generator, migration planner (pure; tests run the SQL on node:sqlite) — M1
+   ├─ files/          # streaming multipart parser, image dimensions and Exif, MIME types, titles, transformation plans (pure) — M5
    └─ sdk/            # TypeScript client SDK — M7+
 ```
 
@@ -92,7 +94,7 @@ Tooling: pnpm 10 workspaces, TypeScript 5.9, Vitest 4 + `@cloudflare/vitest-plug
 
 ## 6. Data model — system tables
 
-Every system table uses the `cirrus_` prefix; user collections may not use it. The authoritative definition is [`apps/api/migrations/`](../apps/api/migrations/) (`0002` adds the full Directus collection/field meta, `0003` the Directus user fields, sessions and the guard table, `0004` the relation meta and the batch keys table). The API exposes the access tables as Directus' system collections (`directus_users`, `directus_roles`, `directus_policies`, `directus_permissions`, `directus_access`), defined in code in `apps/api/src/system/collections.ts` (ADR-019).
+Every system table uses the `cirrus_` prefix; user collections may not use it. The authoritative definition is [`apps/api/migrations/`](../apps/api/migrations/) (`0002` adds the full Directus collection/field meta, `0003` the Directus user fields, sessions and the guard table, `0004` the relation meta and the batch keys table, `0005` files and folders). The API exposes these tables as Directus' system collections (`directus_users`, `directus_roles`, `directus_policies`, `directus_permissions`, `directus_access`, `directus_files`, `directus_folders`), defined in code in `apps/api/src/system/collections.ts` (ADR-019).
 
 | Table | Purpose |
 |---|---|
@@ -105,7 +107,8 @@ Every system table uses the `cirrus_` prefix; user collections may not use it. T
 | `cirrus_users` | Email (case-insensitive, unique), password hash, role, status, the Directus profile fields, static token (its SHA-256 only) |
 | `cirrus_sessions` | One row per refresh token (its SHA-256), with the user, expiry, IP, user agent and origin |
 | `cirrus_permissions` | Per policy × collection × action: allowed `fields`, row-level `permissions` filter, payload `validation`, `presets` |
-| `cirrus_files` | R2 storage key, filename, MIME type, size, dimensions, uploader |
+| `cirrus_files` | Directus 11's file columns: `storage`, `filename_disk` (the object's key in R2; unique, set by the server), `filename_download`, `title`, `type`, `folder`, `filesize`, `width`/`height`, `metadata`, focal point, uploader/modifier and dates (§11) |
+| `cirrus_folders` | `name` and `parent` (a folder with subfolders can't be deleted, as in Directus) |
 | `cirrus_settings` | Key/value JSON, including `schema_version` |
 | `cirrus_guard` | Never holds rows: guard statements insert into it to fail their batch (ADR-018); `ok` fails as FORBIDDEN, `fk` as INVALID_FOREIGN_KEY |
 | `cirrus_batch_keys` | Scratch keys passed between statements of one batch (ADR-023); the batch empties it as its last statement |
@@ -185,7 +188,7 @@ DELETE /items/:collection            delete many: [keys] | { keys } | { query }
 
 Response: `{ "data": …, "meta": { "total_count", "filter_count" } }` (meta only when requested). Writes answer with the written items as the request's query reads them (`?fields=` …), or 204 when that query matches none of them (or the request may not read them); deletes answer 204. As in Directus, collections that don't exist (and folders) are `FORBIDDEN`, and so are items that don't exist. Admins' updates and deletes by keys skip missing items; with permissions, every key must exist and be writable, or nothing is written (Directus validateAccess). By query, they apply to the rows the query selects within the permission's rows, so its limit (default 100) applies, as in Directus.
 
-The system collections are served by the same code at their Directus paths: `/users`, `/roles`, `/policies`, `/permissions`, `/access`, plus `/users/me`, `/roles/me`, `/policies/me/globals`, `/permissions/me` and `/permissions/me/:collection/:id`. `/items/directus_*` is `FORBIDDEN`, as in Directus.
+The system collections are served by the same code at their Directus paths: `/users`, `/roles`, `/policies`, `/permissions`, `/access`, `/files` and `/folders` (§11), plus `/users/me`, `/roles/me`, `/policies/me/globals`, `/permissions/me` and `/permissions/me/:collection/:id`. `/items/directus_*` is `FORBIDDEN`, as in Directus.
 
 Each request is one D1 round trip after the schema check: reads batch the data query with the queries for relational fields and the count queries, writes run as one batch, so a write is all or nothing.
 
@@ -298,7 +301,7 @@ Implemented in M4: `apps/api/src/schema/relations.ts` (payloads, changes), `apps
 | M2M | a junction collection with two M2O relations, each naming the other field as `junction_field`; each side's alias is an O2M to the junction |
 | M2A | later ❓ |
 
-**API** (Directus shape): `GET /relations`, `/relations/:collection` (its M2O fields), `/relations/:collection/:field`; `POST /relations`, `PATCH` and `DELETE /relations/:collection/:field`, admin-only. A relation is `{ collection, field, related_collection, meta: { one_field, junction_field, sort_field, one_deselect_action, … }, schema }`. As in Directus, the field must exist first (and `one_field` must be an alias field of the related collection), its type must store keys like the related primary key (`integer` and `bigInteger` mix), and `schema: null` creates a relation nothing enforces; any other `schema` (or none) enforces it, with `on_delete` (`NO ACTION` by default, as a database foreign key). Non-admins see the relations whose fields they may read. Relations may point at user collections and at `directus_users`, `directus_roles` and `directus_policies`; the system collections' own relations (`directus_users.role`, `directus_roles.users`, `directus_access.policy`, …) are defined in code and work in queries, but aren't listed, like the system collections themselves.
+**API** (Directus shape): `GET /relations`, `/relations/:collection` (its M2O fields), `/relations/:collection/:field`; `POST /relations`, `PATCH` and `DELETE /relations/:collection/:field`, admin-only. A relation is `{ collection, field, related_collection, meta: { one_field, junction_field, sort_field, one_deselect_action, … }, schema }`. As in Directus, the field must exist first (and `one_field` must be an alias field of the related collection), its type must store keys like the related primary key (`integer` and `bigInteger` mix), and `schema: null` creates a relation nothing enforces; any other `schema` (or none) enforces it, with `on_delete` (`NO ACTION` by default, as a database foreign key). Non-admins see the relations whose fields they may read. Relations may point at user collections and at `directus_users`, `directus_roles`, `directus_policies`, `directus_files` and `directus_folders`; the system collections' own relations (`directus_users.role`, `directus_roles.users`, `directus_access.policy`, `directus_files.folder`, …) are defined in code and work in queries, but aren't listed, like the system collections themselves. Their tables' foreign keys keep them, except `directus_users.avatar`, which the items service keeps like user relations (ADR-026).
 
 **Enforcement** (ADR-021): Cirrus keeps relations in the items service instead of SQLite foreign keys, in the same batch as the write:
 - keys an M2O is set to must reference items: one guard statement per field (§8.6);
@@ -345,11 +348,62 @@ Implemented in M3: `apps/api/src/auth` (login, refresh, logout), `apps/api/src/m
 
 ## 11. Files (R2)
 
-- `POST /files`: multipart upload streamed straight into R2, metadata written to `cirrus_files`.
-- Large files: R2 presigned URLs / multipart upload.
-- `GET /assets/:id`: served through the Worker with permission checks and `Range` support.
-- Image transforms (`?width=&format=`): Cloudflare Images / Image Resizing ❓ (depends on plan).
-- Caching: `Cache-Control` + Cache API for public assets.
+Implemented in M5: `packages/files` (pure: the streaming multipart parser, image dimensions and Exif, MIME types, titles, transformation plans; tests run on Node), `apps/api/src/files` (R2 storage, the files service, assets), `apps/api/src/routes/files.ts`, and the system collections `directus_files` and `directus_folders` over `cirrus_files` and `cirrus_folders` (migration `0005`). The contents live in the R2 bucket bound as `STORAGE`, under `filename_disk`.
+
+### 11.1 Endpoints
+
+```
+POST   /files                    upload (multipart/form-data), or a record without contents (JSON, needs `type`)
+POST   /files/import             { url, data?, options?: { filterMimeType } }: fetch a URL, store it like an upload
+PATCH  /files/:id                replace the contents (multipart/form-data), or update the record (JSON)
+GET | SEARCH | PATCH | DELETE /files…    the items endpoints of directus_files; deletes also delete the contents
+/folders…                        the items endpoints of directus_folders
+GET    /assets/:id[/:filename]   the contents (and HEAD), possibly transformed
+```
+
+### 11.2 Uploads
+
+- Multipart bodies are parsed as they arrive (`readMultipart()`), with the rules of Directus' busboy handler: fields describe the next file (fields after the last one are ignored); `"null"`, `"true"` and `"false"` are those values; a file without a name, or with a type `FILES_MIME_TYPE_ALLOW_LIST` doesn't allow, is `INVALID_PAYLOAD`, and so is a body without files ("No files were included in the body") or a malformed one. Several files answer a list, one an object.
+- Each file is written to R2 while it is read (`ObjectWriter`): a single put when it fits in one part (8 MiB), otherwise an R2 multipart upload in equal parts, so a Worker holds at most a part in memory whatever the size (ADR-024). `FILES_MAX_UPLOAD_SIZE` (e.g. `100mb`) caps each file (`CONTENT_TOO_LARGE`, 413); without it the plan's request body limit applies (100 MB on Free and Pro). Storage failures are `SERVICE_UNAVAILABLE` (`service: "files"`).
+- Then one batch writes the records of every file in the request through the items service (permissions, presets, validation, relations): all or nothing. When it fails, the stored objects are deleted. A request without create permission fails before anything is stored.
+- The server sets what the upload determines. These values need no field permission, but validation sees them, so a permission can require `type` to start with `image/` or `filesize` to stay under a limit: `id` (a UUIDv7, unless the request gives one), `storage` (`r2`), `filename_disk`, `filesize`, `uploaded_on`, `type` (the part's Content-Type), and, unless the request sets them, `title` (`formatTitle()` of the name, a port of @directus/format-title), `filename_download`, `width`, `height` and `metadata`.
+- Image details are read from the first bytes without decoding (`readImageMetadata()`; Workers have no sharp), for Directus' metadata types (JPEG, PNG, WebP, GIF, TIFF, AVIF): width and height as displayed (swapped for Exif orientations 5–8), and the Exif tags `FILE_METADATA_ALLOW_LIST` names (Directus' default: `ifd0.Make`, `ifd0.Model`, `exif.FNumber`, `exif.ExposureTime`, `exif.FocalLength`, `exif.ISOSpeedRatings`), as `{ ifd0: {…}, exif: {…} }`. IPTC, XMP and ICC aren't read.
+- Object keys: Directus' `<id><ext>` when the id was just generated; otherwise (a replacement, or an id the request gives, which may be taken) `<id>-<random><ext>`, so a write that fails never touches another file's contents. Requests can't set `filename_disk` or another `storage` (`INVALID_PAYLOAD`): a record pointing at another file's object would serve that file.
+- Replacing (`PATCH /files/:id` with one file) stores the new contents under a new key and updates the record (update permission on the row; the title stays, the image details are read again), reading the old key in the same batch; the old contents and their variants are deleted afterwards.
+- `POST /files` with JSON creates records without contents (`filename_disk` null), as Directus' createOne; they need a `type`, and their assets are `FORBIDDEN`.
+- Imports are fetched by the Worker (`http` and `https`, redirects followed): the name comes from the final URL, the type from its Content-Type (checked against the allow list and `options.filterMimeType`), the title is `formatTitle()` of the whole name, as in Directus. `data.id` naming an existing file replaces its contents. Unreachable URLs and answers other than 2xx are `SERVICE_UNAVAILABLE` (`service: "external-file"`).
+
+### 11.3 Deleting, folders and relations
+
+- Deleting files (by key, keys or query) runs through the items service, so relations pointing at them apply their `on_delete` (§9). The batch returns the deleted rows' `filename_disk`; their objects and variants are deleted once it has committed. A failure there only leaves unreferenced objects behind, and is logged.
+- `directus_files.folder`, `uploaded_by` and `modified_by`, and `directus_folders.parent`, are kept by the tables' own foreign keys, as in Directus: deleting a folder clears its files' folder, a folder with subfolders can't be deleted (`INVALID_FOREIGN_KEY`), and deleting a user clears what they uploaded or modified.
+- `directus_users.avatar` points at files without a foreign key (adding one would rebuild `cirrus_users`, ADR-021): the items service keeps it like user relations, so avatars must be files and deleting a file clears them (ADR-026).
+- User collections may relate to `directus_files` and `directus_folders`: a post's cover image is a `uuid` field with a relation to `directus_files`, with any `on_delete`. Reads, filters and sorts reach through it (`cover.title`, `filter[cover][type][_starts_with]=image/`).
+
+### 11.4 Assets
+
+`GET /assets/:id` reads the id from the first 36 characters, as Directus does, so `/assets/<id>.jpg` works; `/assets/:id/:filename` sets the download name.
+- Access: the request must be able to read the file's row (whatever fields; Directus validateItemAccess). The record is read as the server, in the same batch as that check. Malformed ids, files without contents and missing objects are `FORBIDDEN`. Tokens may come as `?access_token=`, for `<img src>`.
+- Headers, as Directus': `Content-Type` (the file's type), `Content-Length`, `Content-Disposition` (`inline`, or `attachment` with `?download`; an ASCII name plus RFC 6266 `filename*` when it isn't one), `Accept-Ranges: bytes`, `Cache-Control: public|private, max-age=` `ASSETS_CACHE_TTL` (30 days), `Last-Modified` and `ETag` from `modified_on` (a variant's ETag adds its hash), `Vary: Origin, Cache-Control` (plus `Accept` when the format is negotiated). Also `Content-Security-Policy: default-src 'none'` and `X-Content-Type-Options: nosniff`, so uploaded HTML or SVG can't run scripts on the API's origin.
+- `Range: bytes=a-b`, `a-` or `-n` (the first range when several are asked for) answers 206 with `Content-Range`; a range outside the file is `RANGE_NOT_SATISFIABLE` (416); other units are ignored. `If-None-Match` and `If-Modified-Since` answer 304. `HEAD` answers the headers without reading the object.
+
+### 11.5 Image transformations
+
+`?width`, `height`, `fit`, `format`, `quality`, `withoutEnlargement`, `focal_point_x`, `focal_point_y`, `key` (Directus' `system-*` presets; project presets wait for settings) and `transforms` (a JSON list of `[operation, …arguments]`, at most `ASSETS_TRANSFORM_MAX_OPERATIONS`, 5) are planned in `packages/files` (`planTransform()`, following Directus' resolvePreset) and run by Cloudflare Images through the `IMAGES` binding (ADR-025).
+- Only JPEG, PNG, WebP and AVIF are transformed (Directus' list without TIFF, which the binding can't read); other files are served as they are, as in Directus. The dimensions must be known and at most `ASSETS_TRANSFORM_IMAGE_MAX_DIMENSION` (6000) per side, else `ILLEGAL_ASSET_TRANSFORMATION`.
+- sharp's fits become the binding's: `cover` → `cover` (centered on the focal point, as a `box-center` gravity), `contain` → `pad` (black, as sharp), `inside` → `contain`, `fill` → `squeeze`, `outside` → the size it computes; with one dimension the aspect ratio is kept. `withoutEnlargement` caps the size at the image's.
+- `format`: `jpg`/`jpeg`, `png`, `webp`, `avif`, or `auto` (AVIF or WebP when `Accept` allows them, else Directus' fallback); `tiff` is `INVALID_QUERY`.
+- `transforms` may use what the binding can do: `resize`, `extract`, `rotate` (by multiples of 90°), `flip`, `flop`, `blur`, `sharpen`, `modulate` (brightness, saturation), `greyscale`, `trim`, and the format operations (`toFormat`, `jpeg`, `png`, `webp`, `avif`). Other Directus operations are `INVALID_QUERY`.
+- Each variant is made once and kept in R2 next to the original as `<name>__<hash><ext>` (Directus' naming), and deleted with it. Without the `IMAGES` binding, transformations are `INVALID_QUERY` ("Dynamic asset generation is disabled").
+
+### 11.6 Differences from Directus
+
+- Values the upload determines need no field permission (Directus' create permission must grant `type`, `title`, `storage` and `filename_download`), and validation sees the size and dimensions (Directus writes them afterwards, without checks).
+- The files of one request are stored together: all or none (Directus writes each as it comes).
+- Replacing a file reads its image details again (Directus keeps the old metadata, and the old dimensions of a replacement that isn't an image).
+- `Cache-Control` is `public` for anonymous requests only; Directus also uses it for users without a role, who may have policies of their own.
+- A range ending where it starts (`bytes=0-0`) is one byte; Directus refuses it. `withoutEnlargement=false` is false; Directus reads any value as true.
+- Not yet: TUS resumable uploads, zip downloads (`POST /assets/files`, `/assets/folder/:id`), the presets and default folder of `directus_settings`, IPTC and XMP metadata.
 
 ---
 
@@ -382,7 +436,7 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | **M2 – Items** ✅ | Dynamic CRUD + filter/sort/fields/pagination | CRUD on `posts` with nested `_and/_or` filters |
 | **M3 – Auth & RBAC** ✅ | Login, JWT, roles, policies, permissions + row-level | An "editor" role only sees its own posts |
 | **M4 – Relations** ✅ | M2O, O2M, M2M + nested `fields`, relational filters, `deep`, nested writes, `on_delete` | `posts.author.name`, `posts.tags.*` |
-| **M5 – Files** | Upload/serve via R2 | A post can have a cover image |
+| **M5 – Files** ✅ | Uploads streamed into R2, folders, assets (Range, cache headers), image transformations (Images binding) | A post can have a cover image |
 | **M6 – Admin UI MVP** | Data model + Content + Files | `posts` can be managed entirely through the UI |
 | **M7+** | Flows (Queues), realtime (DO), cache, schema snapshot, SDK | — |
 
@@ -396,13 +450,15 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | R2 | Schema snapshots drifting between isolates | Check `schema_version` in D1 on each request (one small, strongly consistent query) — ADR-012 |
 | R3 | Deep relational queries causing N+1 / CPU cost | One statement per relational field, all in one batch (ADR-022); `MAX_RELATIONAL_DEPTH`; O2M items limited per parent. Each statement counts towards D1's queries per Worker invocation, so wide `*.*.*` reads can hit it |
 | R7 | Relations are only as consistent as the code path that writes items (ADR-021) | Every item write goes through the items service, which there is no way around in the API; tests cover each write and delete path |
+| R8 | R2 and D1 can't share a transaction: a Worker stopped between storing an upload and writing its record, or a failed delete of old contents, leaves objects nothing references | Never the other way round (records always point at stored objects, ADR-024); failures are logged. Later: a scheduled job deleting objects without a record |
+| R9 | Imports fetch any public `http(s)` URL from the Worker | Workers can't reach private networks; only requests with create permission on `directus_files` can import |
 | R4 | D1's single writer under concurrent writes | Acceptable for single-project; monitor latency |
 | R5 | Combining row-level filters and field permissions across policies makes SQL complex (`CASE WHEN` per field) | One CASE per field and statement, sharing parameters; tested on SQLite in `packages/query` |
 | R6 | No login rate limiting yet: passwords can be guessed at the speed of PBKDF2 | Add a rate limit (Workers rate limiting binding or a Durable Object) before production use |
 | Q1 | Vue or React for the admin UI? | ✅ Vue — ADR-006 |
 | Q2 | Default ID: integer autoincrement or UUID? | ✅ UUID by default, integer selectable per collection — ADR-007 |
 | Q3 | Directus SDK compatibility? | ✅ Yes (REST) — ADR-008, §17 |
-| Q4 | Which image transform service? | ❓ (M5) |
+| Q4 | Which image transform service? | ✅ The Cloudflare Images binding — ADR-025 |
 | Q5 | Which Directus / `@directus/sdk` version to target? | ✅ Directus 11.x — ADR-009 |
 | Q6 | Adopt the Directus 11 **policy** model? | ✅ Yes — ADR-010, §6, §10 |
 
@@ -430,11 +486,14 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | ADR-016 | `QUERY_LIMIT_DEFAULT` = 100 (as in Directus) and `QUERY_LIMIT_MAX` = 1000 (Directus: unlimited), both Worker vars: every row is serialized within the Worker's CPU and memory limits. With a maximum, `limit=-1` returns that many, as in Directus | ✅ Accepted |
 | ADR-017 | Access tokens are HS256 JWTs (WebCrypto, `SECRET`) with Directus' claims; requests recompute policies from the snapshot instead of trusting `admin_access`/`app_access` claims. Refresh tokens and static tokens are random values stored only as SHA-256 digests (fast hashing is enough for high-entropy tokens, and a leaked database leaks no working token); refresh tokens rotate on every use. Directus stores both in plain text and keeps a short grace period for reused refresh tokens, which Cirrus doesn't | ✅ Accepted |
 | ADR-018 | Writes that must check rows first put a guard statement before themselves in the same D1 batch: `INSERT INTO cirrus_guard SELECT 0 WHERE <violation>`, against a table whose CHECK always fails. D1 batches are transactions, so a violation rolls back everything, in one round trip, without the race of a separate read. Used for permissions on keys and queries, and for nested writes | ✅ Accepted |
-| ADR-019 | System collections (`directus_users`, `directus_roles`, `directus_policies`, `directus_permissions`, `directus_access`) are defined in code over the `cirrus_*` tables and served by the items service, so queries, permissions, errors and nested writes behave as for user collections. They aren't listed in `/collections` yet | ✅ Accepted |
+| ADR-019 | System collections (`directus_users`, `directus_roles`, `directus_policies`, `directus_permissions`, `directus_access`, and since M5 `directus_files`, `directus_folders`) are defined in code over the `cirrus_*` tables and served by the items service, so queries, permissions, errors and nested writes behave as for user collections. They aren't listed in `/collections` yet | ✅ Accepted |
 | ADR-020 | The public policy applies to requests without a user and to users without a role, as in Directus 11 (not to every request, as this document first said) | ✅ Accepted |
 | ADR-021 | Relations are kept by the items service, not by SQLite foreign keys (this document first planned foreign keys). D1 runs every batch in a transaction, so `PRAGMA foreign_keys = OFF` is a no-op, and `defer_foreign_keys` only defers checks: when a table rebuild (§7.2) drops a referenced table, SQLite's implicit `DELETE` runs the children's `ON DELETE CASCADE` / `SET NULL` on every row (verified on workerd's D1). Adding or dropping a constraint would also need a rebuild. Instead, writes check the M2O keys they set with guard statements and deletes apply `on_delete` themselves, in the same batch (as permissions do, ADR-018); relations are metadata, so schema changes never touch data. The system tables keep their own foreign keys, which nothing rebuilds | ✅ Accepted |
 | ADR-022 | Reads with relational fields run one statement per relational field in the same batch as the items, each repeating its parent selection as a subquery rather than receiving keys from a previous round trip: one round trip and one snapshot for any depth, at the cost of re-evaluating the parent query (SQLite materializes `IN (subquery)` once). O2M limits apply per parent, with `ROW_NUMBER()` | ✅ Accepted |
 | ADR-023 | `cirrus_batch_keys` passes keys between statements of one batch: the keys a delete removes (so on_delete actions can't change which rows it removes) and the auto-increment keys of items a nested write creates (read back with `max(key)`, which AUTOINCREMENT makes the new row's). D1 serializes writes and a batch empties the table as its last statement, so it never holds rows outside a transaction | ✅ Accepted |
+| ADR-024 | Uploads are streamed into R2 as they arrive, then their records are written in one D1 batch. The multipart parser is Cirrus' own (`packages/files`), since `formData()` buffers whole files in the Worker's 128 MB; R2 refuses streams of unknown length, so `ObjectWriter` stores a file that fits in one 8 MiB part with a put, and a larger one as a multipart upload in equal parts. Directus creates the record first and deletes it when the write fails; Cirrus stores first, under keys no other file can have, so the record write stays one atomic batch, with permissions and validation seeing the size and dimensions, and a failure only has to delete objects. Old contents are deleted after the batch that stops referencing them | ✅ Accepted |
+| ADR-025 | Image transformations run on the Cloudflare Images binding (Q4), and each variant is kept in R2 next to its original, as Directus keeps them in storage. The binding reads the R2 stream directly, needs no zone or public URL (unlike Image Resizing through `fetch` with `cf.image`), and works on every plan; WebAssembly image libraries would strain the Worker's CPU and size limits. Directus' sharp parameters are translated (§11.5); operations the binding lacks are refused rather than ignored. Local development and tests use miniflare's binding, backed by sharp | ✅ Accepted |
+| ADR-026 | `directus_users.avatar` → `directus_files` is kept by the items service, like user relations (ADR-021): adding a foreign key to `cirrus_users` would rebuild it, firing the cascades of the tables that reference it. The other relations of `cirrus_files` and `cirrus_folders` are their own foreign keys, created with the tables | ✅ Accepted |
 
 ---
 
@@ -446,7 +505,7 @@ Goal: a client written as `createDirectus(url).with(rest()).with(authentication(
 
 | Area | Requirement |
 |---|---|
-| Paths | Unchanged: `/items/:collection`, `/collections`, `/fields/:collection`, `/relations`, `/files`, `/assets/:id`, `/users`, `/users/me`, `/roles`, `/policies`, `/permissions`, `/permissions/me`, `/auth/*`, `/server/info`, `/server/ping`, `/server/health` |
+| Paths | Unchanged: `/items/:collection`, `/collections`, `/fields/:collection`, `/relations`, `/files`, `/folders`, `/assets/:id`, `/users`, `/users/me`, `/roles`, `/policies`, `/permissions`, `/permissions/me`, `/auth/*`, `/server/info`, `/server/ping`, `/server/health` |
 | Query params | Accept both JSON strings (`filter={…}`) and bracket syntax (`filter[status][_eq]=x`); `fields` and `sort` as comma-separated lists or arrays; minimal `deep` and `alias` support |
 | Responses | Wrapped in `{ "data": … }`, with `meta` when requested |
 | Errors | `{ "errors": [{ "message", "extensions": { "code" } }] }` using Directus codes (`FORBIDDEN`, `INVALID_CREDENTIALS`, `INVALID_PAYLOAD`, `RECORD_NOT_UNIQUE`, `TOKEN_EXPIRED`, …) and matching HTTP statuses |
@@ -463,7 +522,7 @@ Goal: a client written as `createDirectus(url).with(rest()).with(authentication(
 ### 17.3 Compatibility testing
 
 - A **contract test** suite runs the real `@directus/sdk` 21.3.0 against the local Worker via `@cloudflare/vitest-plugin`.
-- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`, `readCollections`, `readCollection`, `readFields`, `readFieldsByCollection`, `readField`, `updateCollection`, `updateCollectionsBatch`, `updateField`, `updateFields`, `deleteField`, `deleteCollection`; M2 → `readItems`, `readItem`, `createItem`, `createItems`, `updateItem`, `updateItems`, `updateItemsBatch`, `deleteItem`, `deleteItems`, `readSingleton`, `updateSingleton`, `withSearch`; M3 → `login` (command and `authentication()`), `refresh`, `logout`, `readMe`, `updateMe`, `readUsers`, `readUser`, `createUser(s)`, `updateUser`, `deleteUser`, `readRoles`, `readRole`, `readRolesMe`, `createRole`, `updateRole`, `deleteRole`, `readPolicies`, `readPolicy`, `readPolicyGlobals`, `createPolicy`, `updatePolicy`, `deletePolicy`, `readPermissions`, `readPermission`, `readUserPermissions`, `readItemPermissions`, `createPermission(s)`, `updatePermission`, `deletePermission`, `readProviders`; M4 → `createRelation`, `readRelations`, `readRelationByCollection`, `readRelation`, `updateRelation`, `deleteRelation`, and `createItem`, `readItems`, `readItem`, `updateItem` with relational fields (object syntax), filters, sorts and `deep`; M5 → `uploadFiles`.
+- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`, `readCollections`, `readCollection`, `readFields`, `readFieldsByCollection`, `readField`, `updateCollection`, `updateCollectionsBatch`, `updateField`, `updateFields`, `deleteField`, `deleteCollection`; M2 → `readItems`, `readItem`, `createItem`, `createItems`, `updateItem`, `updateItems`, `updateItemsBatch`, `deleteItem`, `deleteItems`, `readSingleton`, `updateSingleton`, `withSearch`; M3 → `login` (command and `authentication()`), `refresh`, `logout`, `readMe`, `updateMe`, `readUsers`, `readUser`, `createUser(s)`, `updateUser`, `deleteUser`, `readRoles`, `readRole`, `readRolesMe`, `createRole`, `updateRole`, `deleteRole`, `readPolicies`, `readPolicy`, `readPolicyGlobals`, `createPolicy`, `updatePolicy`, `deletePolicy`, `readPermissions`, `readPermission`, `readUserPermissions`, `readItemPermissions`, `createPermission(s)`, `updatePermission`, `deletePermission`, `readProviders`; M4 → `createRelation`, `readRelations`, `readRelationByCollection`, `readRelation`, `updateRelation`, `deleteRelation`, and `createItem`, `readItems`, `readItem`, `updateItem` with relational fields (object syntax), filters, sorts and `deep`; M5 → `uploadFiles`, `importFile`, `readFiles`, `readFile`, `updateFile` (JSON and `FormData`), `updateFiles`, `updateFilesBatch`, `deleteFile`, `deleteFiles`, `readAssetRaw`, `readAssetBlob`, `readAssetArrayBuffer` (with transformations), `createFolder(s)`, `readFolders`, `readFolder`, `updateFolder(s)`, `updateFoldersBatch`, `deleteFolder(s)`, and a relation to `directus_files` (a cover image).
 - With a real Directus available, send the same requests to both and compare response snapshots (ignoring ids and timestamps). The reference server uses the `directus/directus:11.17.4` image (not v12, which limits collections on the Core tier).
 - `@directus/sdk` is MIT-licensed; the licensing limits apply only to the Directus server, not to using the SDK as a test client.
 

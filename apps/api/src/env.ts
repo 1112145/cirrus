@@ -1,5 +1,9 @@
 export type Bindings = {
   DB: D1Database;
+  /** The R2 bucket holding the files' contents (spec §11). Without it, uploads and assets answer SERVICE_UNAVAILABLE. */
+  STORAGE?: R2Bucket;
+  /** Cloudflare Images, for asset transformations (`/assets/:id?width=…`). Optional: without it, they're refused. */
+  IMAGES?: ImagesBinding;
   PROJECT_NAME: string;
   DEFAULT_LANGUAGE: string;
   /**
@@ -25,6 +29,18 @@ export type Bindings = {
   QUERY_LIMIT_MAX?: string;
   /** Most segments a path into relations may have in a query (Directus MAX_RELATIONAL_DEPTH; at least 2). Default 10. */
   MAX_RELATIONAL_DEPTH?: string;
+  /** Largest upload, e.g. "100mb" (Directus FILES_MAX_UPLOAD_SIZE). Default: none (the plan's request size limit applies). */
+  FILES_MAX_UPLOAD_SIZE?: string;
+  /** MIME types uploads may have, comma-separated patterns (Directus FILES_MIME_TYPE_ALLOW_LIST). Default "*\/*". */
+  FILES_MIME_TYPE_ALLOW_LIST?: string;
+  /** Exif tags kept in files' metadata, comma-separated `<section>.<tag>` (Directus FILE_METADATA_ALLOW_LIST). */
+  FILE_METADATA_ALLOW_LIST?: string;
+  /** How long clients may cache assets, e.g. "30d" (Directus ASSETS_CACHE_TTL). Default 30 days. */
+  ASSETS_CACHE_TTL?: string;
+  /** Most operations in an asset's `transforms` (Directus ASSETS_TRANSFORM_MAX_OPERATIONS). Default 5. */
+  ASSETS_TRANSFORM_MAX_OPERATIONS?: string;
+  /** Largest width or height of an image that may be transformed (Directus ASSETS_TRANSFORM_IMAGE_MAX_DIMENSION). Default 6000. */
+  ASSETS_TRANSFORM_IMAGE_MAX_DIMENSION?: string;
 };
 
 /** The credential a request presented, before policies are looked up. */
