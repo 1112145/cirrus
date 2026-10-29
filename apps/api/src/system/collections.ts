@@ -2,7 +2,7 @@ import type { ColumnDef, FieldType, JsonValue } from '@cirrus/schema';
 import { invalidPayload, isIpNetwork, isPlainObject } from '@cirrus/shared';
 import { ACTIONS } from '../access/snapshot.ts';
 import { COLLECTION_META, FIELD_META, type FieldMeta, metaDefaults } from '../schema/meta.ts';
-import type { CollectionRecord, FieldRecord, O2M, Schema } from '../schema/store.ts';
+import type { CollectionRecord, FieldRecord, RelationRecord, Schema } from '../schema/store.ts';
 
 /**
  * System collections (spec §6, §17.2): Directus' names and fields over the cirrus_* tables. They
@@ -33,7 +33,6 @@ type Spec = {
   maxLength?: number;
   special?: string[];
   searchable?: boolean;
-  o2m?: O2M;
 };
 
 let nextId = -1;
@@ -54,7 +53,7 @@ function field(collection: string, name: string, s: Spec): FieldRecord {
           numericScale: null,
         };
   const meta: FieldMeta = { ...metaDefaults(FIELD_META), special: s.special ?? null, searchable: s.searchable ?? true };
-  return { id: nextId--, collection, field: name, type: s.type, column, meta, ...(s.o2m ? { o2m: s.o2m } : {}) };
+  return { id: nextId--, collection, field: name, type: s.type, column, meta };
 }
 
 function collection(name: string, table: string, specs: Record<string, Spec>, rest: Omit<SystemCollection, 'collection' | 'folder' | 'meta' | 'fields' | 'table'>): SystemCollection {
@@ -72,7 +71,8 @@ const ID: Spec = { type: 'uuid', primary: true, special: ['uuid'] };
 const string = (maxLength: number, extra: Partial<Spec> = {}): Spec => ({ type: 'string', maxLength, ...extra });
 const json: Spec = { type: 'json', special: ['cast-json'] };
 const bool = (defaultValue: boolean): Spec => ({ type: 'boolean', required: true, defaultValue, special: ['cast-boolean'] });
-const o2m = (collection: string, field: string, deselect: O2M['deselect']): Spec => ({ type: 'alias', special: ['o2m'], o2m: { collection, field, deselect } });
+/** An O2M alias; its relation is in SYSTEM_RELATIONS. */
+const o2m: Spec = { type: 'alias', special: ['o2m'] };
 
 // Normalizers --------------------------------------------------------------------------------------
 
@@ -167,7 +167,7 @@ export const USERS = collection(
     theme_dark_overrides: json,
     status: string(16, { required: true, defaultValue: 'active' }),
     role: { type: 'uuid' },
-    policies: o2m('directus_access', 'user', 'delete'),
+    policies: o2m,
   },
   { snapshot: false, defaults: {}, normalize: normalizeUser },
 );
@@ -181,9 +181,9 @@ export const ROLES = collection(
     icon: string(64, { defaultValue: 'supervised_user_circle' }),
     description: { type: 'text' },
     parent: { type: 'uuid' },
-    children: o2m('directus_roles', 'parent', 'nullify'),
-    policies: o2m('directus_access', 'role', 'delete'),
-    users: o2m('directus_users', 'role', 'nullify'),
+    children: o2m,
+    policies: o2m,
+    users: o2m,
   },
   { snapshot: true, defaults: { icon: 'supervised_user_circle' }, normalize: normalizeRole },
 );
@@ -200,7 +200,7 @@ export const POLICIES = collection(
     enforce_tfa: bool(false),
     admin_access: bool(false),
     app_access: bool(false),
-    permissions: o2m('directus_permissions', 'policy', 'delete'),
+    permissions: o2m,
   },
   { snapshot: true, defaults: { icon: 'badge' }, normalize: normalizePolicy },
 );
@@ -237,6 +237,36 @@ export const ACCESS = collection(
 export const SYSTEM_COLLECTIONS: ReadonlyMap<string, SystemCollection> = new Map(
   [USERS, ROLES, POLICIES, PERMISSIONS, ACCESS].map((c) => [c.collection, c]),
 );
+
+/**
+ * Relations between system collections, as in Directus' system data. The cirrus_* tables' own
+ * foreign keys keep them (migrations 0001, 0003): on_delete here only describes what those do.
+ */
+let nextRelation = -1;
+const relation = (
+  collection: string,
+  field: string,
+  related: string,
+  oneField: string | null,
+  deselect: RelationRecord['deselect'],
+  onDelete: RelationRecord['onDelete'],
+): RelationRecord => ({ id: nextRelation--, collection, field, related, oneField, junctionField: null, sortField: null, deselect, onDelete, system: true });
+
+export const SYSTEM_RELATIONS: readonly RelationRecord[] = [
+  relation('directus_users', 'role', 'directus_roles', 'users', 'nullify', 'SET NULL'),
+  relation('directus_roles', 'parent', 'directus_roles', 'children', 'nullify', 'SET NULL'),
+  relation('directus_access', 'role', 'directus_roles', 'policies', 'delete', 'CASCADE'),
+  relation('directus_access', 'user', 'directus_users', 'policies', 'delete', 'CASCADE'),
+  relation('directus_access', 'policy', 'directus_policies', null, 'delete', 'CASCADE'),
+  relation('directus_permissions', 'policy', 'directus_policies', 'permissions', 'delete', 'CASCADE'),
+];
+
+/**
+ * System collections user relations may point at. Deleting their items runs through the items
+ * service, which applies on_delete; directus_access and directus_permissions rows are also deleted
+ * by the tables' own cascades, which wouldn't.
+ */
+export const RELATED_SYSTEM_COLLECTIONS = ['directus_users', 'directus_roles', 'directus_policies'];
 
 /** Map SQLite table names in error messages back to collection names. */
 export const collectionOfTable = (table: string) => [...SYSTEM_COLLECTIONS.values()].find((c) => c.table === table)?.collection ?? table;

@@ -1,11 +1,6 @@
-import {
-  planCreateTable,
-  planDropTable,
-  planTableChange,
-  REBUILD_PREFIX,
-  sameName,
-} from '@cirrus/schema';
-import { CirrusError, forbidden, invalidPayload, uuidv7 } from '@cirrus/shared';
+import { planCreateTable, planDropTable, planTableChange, sameName } from '@cirrus/schema';
+import { forbidden, invalidPayload } from '@cirrus/shared';
+import { commit, prepare } from './commit.ts';
 import {
   buildColumn,
   DEFAULT_PRIMARY_KEY,
@@ -16,7 +11,9 @@ import {
   parseFieldPayload,
 } from './directus.ts';
 import { COLLECTION_META, type CollectionMeta, metaDefaults } from './meta.ts';
+import { keyTypesMatch, relationsOfRemovedFields } from './relations.ts';
 import {
+  anyCollection,
   type CollectionRecord,
   type FieldRecord,
   getCollection,
@@ -24,9 +21,8 @@ import {
   getSchema,
   insertCollection,
   insertField,
-  invalidateSchema,
+  m2oOf,
   type NewField,
-  readSchemaVersion,
   type Schema,
   tableOf,
   updateCollection,
@@ -106,14 +102,26 @@ export async function updateCollections(db: D1Database, items: Array<{ name: unk
   return [...updated.keys()];
 }
 
-/** Drops the table and everything that points at the collection. */
+/**
+ * Drops the table and everything that points at the collection: its permissions and relations,
+ * the M2O fields of other collections pointing at it, and the O2M aliases listing its items
+ * (as in Directus).
+ */
 export async function deleteCollection(db: D1Database, name: string): Promise<void> {
   const schema = await getSchema(db);
   const c = getCollection(schema, name);
+  const incoming = new Map<string, string[]>();
+  for (const r of schema.relations) {
+    if (r.related === name && r.collection !== name) incoming.set(r.collection, [...(incoming.get(r.collection) ?? []), r.field]);
+  }
   await commit(
     db,
     schema,
     [
+      ...[...incoming].flatMap(([other, fields]) => removeFields(db, schema, getCollection(schema, other), fields)),
+      ...schema.relations
+        .filter((r) => r.collection === name && r.oneField && r.related !== name)
+        .flatMap((r) => fieldMetadata(db, r.related, r.oneField!)),
       ...(c.folder ? [] : prepare(db, planDropTable(name))),
       db.prepare('DELETE FROM cirrus_permissions WHERE collection = ?1').bind(name),
       db.prepare('DELETE FROM cirrus_relations WHERE many_collection = ?1 OR one_collection = ?1').bind(name),
@@ -167,6 +175,13 @@ export async function updateFields(db: D1Database, collection: string, items: Ar
     const i = fields.findIndex((f) => f.field === name);
     if (i < 0) throw forbidden();
     const next = applyFieldUpdate(fields[i]!, p);
+    // The key of an M2O must stay comparable with the related primary key.
+    const relation = m2oOf(schema, collection, name);
+    const related = relation && anyCollection(schema, relation.related);
+    const pk = related?.fields.find((f) => f.column?.primaryKey);
+    if (pk && next.type !== fields[i]!.type && !keyTypesMatch(next.type, pk.type)) {
+      throw invalidPayload(`Field "${name}" holds keys of collection "${relation!.related}", which are of type "${pk.type}"`);
+    }
     fields[i] = next;
     updated.set(name, next);
   }
@@ -204,28 +219,38 @@ export async function deleteField(db: D1Database, collection: string, name: stri
   const c = tableCollection(schema, collection);
   const f = getField(c, name);
   if (f.column?.primaryKey) throw invalidPayload("The primary key can't be deleted");
-
-  const plan = planTableChange(tableOf(c), tableOf(c, c.fields.filter((x) => x !== f)));
-  await commit(
-    db,
-    schema,
-    [
-      ...prepare(db, plan.statements),
-      db.prepare('DELETE FROM cirrus_fields WHERE id = ?1').bind(f.id),
-      // Like Directus: clear references to the field in collection meta and in grouped fields.
-      db
-        .prepare(
-          `UPDATE cirrus_collections SET
-             sort_field = CASE WHEN sort_field = ?2 THEN NULL ELSE sort_field END,
-             archive_field = CASE WHEN archive_field = ?2 THEN NULL ELSE archive_field END
-           WHERE collection = ?1`,
-        )
-        .bind(collection, name),
-      db.prepare('UPDATE cirrus_fields SET parent = NULL WHERE collection = ?1 AND parent = ?2').bind(collection, name),
-    ],
-    { collection, field: name },
-  );
+  await commit(db, schema, removeFields(db, schema, c, [name]), { collection, field: name });
 }
+
+/**
+ * Remove fields of a collection: their columns, their metadata and what refers to them. As in
+ * Directus: collection meta and grouped fields forget them, and so do relations; an M2O's relation
+ * goes, and with it the O2M alias on the other side (relationsOfRemovedFields).
+ */
+function removeFields(db: D1Database, schema: Schema, c: CollectionRecord, names: readonly string[]): D1PreparedStatement[] {
+  const plan = planTableChange(tableOf(c), tableOf(c, c.fields.filter((x) => !names.includes(x.field))));
+  const { statements, aliases } = relationsOfRemovedFields(db, schema, c.collection, names);
+  return [
+    ...prepare(db, plan.statements),
+    ...names.flatMap((name) => fieldMetadata(db, c.collection, name)),
+    ...statements,
+    ...aliases.flatMap((a) => fieldMetadata(db, a.collection, a.field)),
+  ];
+}
+
+/** Delete a field's metadata and clear references to it in collection meta and in grouped fields. */
+const fieldMetadata = (db: D1Database, collection: string, name: string) => [
+  db.prepare('DELETE FROM cirrus_fields WHERE collection = ?1 AND field = ?2').bind(collection, name),
+  db
+    .prepare(
+      `UPDATE cirrus_collections SET
+         sort_field = CASE WHEN sort_field = ?2 THEN NULL ELSE sort_field END,
+         archive_field = CASE WHEN archive_field = ?2 THEN NULL ELSE archive_field END
+       WHERE collection = ?1`,
+    )
+    .bind(collection, name),
+  db.prepare('UPDATE cirrus_fields SET parent = NULL WHERE collection = ?1 AND parent = ?2').bind(collection, name),
+];
 
 function tableCollection(schema: Schema, name: string): CollectionRecord {
   const c = getCollection(schema, name);
@@ -233,68 +258,3 @@ function tableCollection(schema: Schema, name: string): CollectionRecord {
   return c;
 }
 
-// Commit -------------------------------------------------------------------------------------
-
-const prepare = (db: D1Database, sql: string[]) => sql.map((s) => db.prepare(s));
-
-type ErrorContext = { collection: string; field?: string | undefined };
-
-/**
- * Run a schema change atomically. The first statement swaps schema_version for a new value only if
- * it still matches the snapshot the change was planned against; otherwise it writes invalid JSON,
- * the json_valid CHECK fails and the whole batch rolls back. D1 has no interactive transactions,
- * so this compare-and-swap is what stops two concurrent changes from overwriting each other.
- */
-export async function commit(db: D1Database, schema: Pick<Schema, 'version'>, statements: D1PreparedStatement[], ctx: ErrorContext) {
-  if (statements.length === 0) return;
-  const bump = db
-    .prepare("UPDATE cirrus_settings SET value = CASE WHEN value = ?1 THEN ?2 ELSE 'conflict' END WHERE key = 'schema_version'")
-    .bind(schema.version, JSON.stringify(uuidv7()));
-  try {
-    await db.batch([bump, ...statements]);
-  } catch (err) {
-    if ((await readSchemaVersion(db)) !== schema.version) {
-      throw new CirrusError('SERVICE_UNAVAILABLE', 'The schema was changed by another request. Please retry.');
-    }
-    throw translateDbError(err, ctx);
-  } finally {
-    invalidateSchema();
-  }
-}
-
-const tableName = (t: string) => (t.startsWith(REBUILD_PREFIX) ? t.slice(REBUILD_PREFIX.length) : t);
-
-/** Turn SQLite errors from DDL on existing data into Directus errors. */
-export function translateDbError(err: unknown, ctx: ErrorContext): unknown {
-  const msg = err instanceof Error ? err.message : String(err);
-  let m: RegExpExecArray | null;
-
-  if ((m = /NOT NULL constraint failed: (\w+)\.(\w+)/.exec(msg))) {
-    const [collection, field] = [tableName(m[1]!), m[2]!];
-    return new CirrusError('CONTAINS_NULL_VALUES', `Field "${field}" in collection "${collection}" contains null values.`, {
-      collection,
-      field,
-    });
-  }
-  if (msg.includes('Cannot add a NOT NULL column')) {
-    return new CirrusError(
-      'CONTAINS_NULL_VALUES',
-      `Field "${ctx.field}" in collection "${ctx.collection}" would contain null values: make it nullable or give it a default value.`,
-      { collection: ctx.collection, field: ctx.field },
-    );
-  }
-  if ((m = /UNIQUE constraint failed: (\w+)\.(\w+)/.exec(msg))) {
-    const [collection, field] = [tableName(m[1]!), m[2]!];
-    return new CirrusError('RECORD_NOT_UNIQUE', `Value for field "${field}" in collection "${collection}" has to be unique.`, {
-      collection,
-      field,
-    });
-  }
-  if ((m = /cannot store \w+ value in (\w+) column (\w+)\.(\w+)/.exec(msg))) {
-    return invalidPayload(`Existing values of field "${m[3]}" in collection "${tableName(m[2]!)}" can't be stored as ${m[1]}`);
-  }
-  if (msg.includes('CHECK constraint failed')) {
-    return invalidPayload(`Existing values in collection "${ctx.collection}" don't fit the new field type`);
-  }
-  return err;
-}

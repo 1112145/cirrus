@@ -14,6 +14,9 @@
     // Keep the maximum modest: every row is serialized within the Worker's CPU and memory limits.
     "QUERY_LIMIT_DEFAULT": "100",
     "QUERY_LIMIT_MAX": "1000",
+    // Most segments a path into relations may have (`author.team.name` is 3), as Directus' MAX_RELATIONAL_DEPTH.
+    // Each relational field is one more statement in the request's batch.
+    "MAX_RELATIONAL_DEPTH": "10",
     // Auth (spec §10), with Directus' names: access token and refresh token lifetimes, and the refresh token cookie.
     "ACCESS_TOKEN_TTL": "15m",
     "REFRESH_TOKEN_TTL": "7d",

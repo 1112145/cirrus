@@ -76,7 +76,8 @@ export function planTableChange(current: TableDef, desired: TableDef): Plan {
  * The SQLite table rebuild (https://www.sqlite.org/lang_altertable.html#otheralter): create the new
  * table, copy the kept columns, swap, recreate indexes. STRICT makes the copy fail loudly on values
  * the new type can't hold, instead of silently converting them.
- * M4: once tables have foreign keys, run with PRAGMA defer_foreign_keys = ON.
+ * User tables have no SQLite foreign keys (ADR-021): with them, D1 would run their ON DELETE
+ * actions on every row when the DROP TABLE here drops a referenced table.
  */
 function rebuildSql(desired: TableDef, copied: string[]): string[] {
   const tmp = quoteIdent(REBUILD_PREFIX + desired.name);

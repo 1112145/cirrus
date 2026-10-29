@@ -40,6 +40,12 @@ import {
   updateUser,
   createField,
   createItem,
+  createRelation,
+  deleteRelation,
+  readRelation,
+  readRelationByCollection,
+  readRelations,
+  updateRelation,
   createItems,
   deleteCollection,
   deleteField,
@@ -479,5 +485,141 @@ describe('@directus/sdk contract — M3', () => {
     const bad = createDirectus(BASE, { globals: { fetch: workerFetch } }).with(staticToken('not-a-token')).with(rest());
     expect(await errorCode(bad.request(readMe()))).toBe('INVALID_CREDENTIALS');
     expect(await errorCode(client.request(readMe()))).toBe('INVALID_CREDENTIALS');
+  });
+});
+
+describe('@directus/sdk contract — M4', () => {
+  // Done when: `posts.author.name`, `posts.tags.*`.
+  const ids: Record<string, string> = {};
+
+  it('createRelation(): M2O + O2M, and M2M through a junction', async () => {
+    await admin.request(deleteCollection('posts')); // M2's
+    const alias = (field: string, special: string) => ({ field, type: 'alias', meta: { special: [special] } });
+    await admin.request(createCollection({ collection: 'authors', schema: {}, fields: [{ field: 'name', type: 'string' }, alias('posts', 'o2m')] }));
+    await admin.request(createCollection({ collection: 'tags', schema: {}, fields: [{ field: 'name', type: 'string' }] }));
+    await admin.request(
+      createCollection({
+        collection: 'posts',
+        schema: {},
+        fields: [{ field: 'title', type: 'string' }, { field: 'author', type: 'uuid', meta: { special: ['m2o'] } }, alias('tags', 'm2m')],
+      }),
+    );
+    await admin.request(
+      createCollection({
+        collection: 'posts_tags',
+        schema: {},
+        meta: { hidden: true },
+        fields: [
+          { field: 'id', type: 'integer', schema: { is_primary_key: true, has_auto_increment: true } },
+          { field: 'posts_id', type: 'uuid' },
+          { field: 'tags_id', type: 'uuid' },
+        ],
+      }),
+    );
+
+    const m2o = await admin.request(
+      createRelation({ collection: 'posts', field: 'author', related_collection: 'authors', meta: { one_field: 'posts' }, schema: { on_delete: 'SET NULL' } }),
+    );
+    expect(m2o).toMatchObject({
+      collection: 'posts',
+      field: 'author',
+      related_collection: 'authors',
+      meta: { many_collection: 'posts', many_field: 'author', one_collection: 'authors', one_field: 'posts', one_deselect_action: 'nullify' },
+      schema: { table: 'posts', column: 'author', foreign_key_table: 'authors', foreign_key_column: 'id', on_delete: 'SET NULL' },
+    });
+    await admin.request(
+      createRelation({
+        collection: 'posts_tags',
+        field: 'posts_id',
+        related_collection: 'posts',
+        meta: { one_field: 'tags', junction_field: 'tags_id', one_deselect_action: 'delete' },
+        schema: { on_delete: 'CASCADE' },
+      }),
+    );
+    await admin.request(
+      createRelation({ collection: 'posts_tags', field: 'tags_id', related_collection: 'tags', meta: { junction_field: 'posts_id' }, schema: { on_delete: 'CASCADE' } }),
+    );
+    expect(await errorCode(admin.request(createRelation({ collection: 'posts', field: 'author', related_collection: 'authors' })))).toBe('INVALID_PAYLOAD');
+    expect(await errorCode(client.request(createRelation({ collection: 'posts', field: 'title', related_collection: 'authors' })))).toBe('FORBIDDEN');
+  });
+
+  it('readRelations() / readRelationByCollection() / readRelation()', async () => {
+    const all = await admin.request(readRelations());
+    expect(all.map((r) => `${r.collection}.${r.field} → ${r.related_collection}`)).toEqual([
+      'posts.author → authors',
+      'posts_tags.posts_id → posts',
+      'posts_tags.tags_id → tags',
+    ]);
+    expect((await admin.request(readRelationByCollection('posts_tags'))).map((r) => r.field)).toEqual(['posts_id', 'tags_id']);
+    expect(await admin.request(readRelation('posts_tags', 'posts_id'))).toMatchObject({ meta: { one_field: 'tags', junction_field: 'tags_id' } });
+    expect(await errorCode(admin.request(readRelation('posts', 'title')))).toBe('FORBIDDEN');
+  });
+
+  it('updateRelation()', async () => {
+    const updated = await admin.request(updateRelation('posts_tags', 'tags_id', { schema: { on_delete: 'RESTRICT' } }));
+    expect(updated.schema).toMatchObject({ on_delete: 'RESTRICT' });
+  });
+
+  it('createItem() with nested M2O and M2M items', async () => {
+    const author = (await admin.request(createItem('authors', { name: 'Ada' }))) as { id: string };
+    ids.ada = author.id;
+    const post = (await admin.request(
+      createItem(
+        'posts',
+        { title: 'Relations', author: author.id, tags: [{ tags_id: { name: 'cms' } }, { tags_id: { name: 'edge' } }] },
+        { fields: ['id', 'title', { author: ['name'] }, { tags: [{ tags_id: ['name'] }] }] },
+      ),
+    )) as { id: string };
+    expect(post).toEqual({ id: post.id, title: 'Relations', author: { name: 'Ada' }, tags: [{ tags_id: { name: 'cms' } }, { tags_id: { name: 'edge' } }] });
+    ids.post = post.id;
+    await admin.request(createItem('posts', { title: 'Second', author: { name: 'Grace' } }));
+  });
+
+  it('readItems() with relational fields: posts.author.name, posts.tags.*', async () => {
+    const posts = await admin.request(readItems('posts', { fields: ['title', { author: ['name'] }, { tags: ['*'] }], sort: ['title'] }));
+    expect(posts).toEqual([
+      {
+        title: 'Relations',
+        author: { name: 'Ada' },
+        tags: [
+          { id: expect.any(Number), posts_id: ids.post, tags_id: expect.any(String) },
+          { id: expect.any(Number), posts_id: ids.post, tags_id: expect.any(String) },
+        ],
+      },
+      { title: 'Second', author: { name: 'Grace' }, tags: [] },
+    ]);
+    // O2M, from the other side
+    expect(await admin.request(readItem('authors', ids.ada!, { fields: ['name', { posts: ['title'] }] }))).toEqual({ name: 'Ada', posts: [{ title: 'Relations' }] });
+  });
+
+  it('readItems() with relational filters, sorts and deep', async () => {
+    const byAuthor = await admin.request(readItems('posts', { fields: ['title'], filter: { author: { name: { _eq: 'Grace' } } } }));
+    expect(byAuthor).toEqual([{ title: 'Second' }]);
+    const byTag = await admin.request(readItems('posts', { fields: ['title'], filter: { tags: { _some: { tags_id: { name: { _eq: 'edge' } } } } } }));
+    expect(byTag).toEqual([{ title: 'Relations' }]);
+    const sorted = await admin.request(readItems('posts', { fields: ['title'], sort: ['-author.name'] }));
+    expect(sorted).toEqual([{ title: 'Second' }, { title: 'Relations' }]);
+    const deep = await admin.request(
+      readItem('posts', ids.post!, { fields: [{ tags: [{ tags_id: ['name'] }] }], deep: { tags: { _limit: 1, _sort: ['-id'] } } }),
+    );
+    expect(deep).toEqual({ tags: [{ tags_id: { name: 'edge' } }] });
+  });
+
+  it('updateItem() with nested O2M changes', async () => {
+    const tag = (await admin.request(createItem('tags', { name: 'serverless' }))) as { id: string };
+    const { tags } = (await admin.request(readItem('posts', ids.post!, { fields: ['tags'] }))) as { tags: number[] };
+    const updated = await admin.request(
+      updateItem('posts', ids.post!, { tags: { create: [{ tags_id: tag.id }], delete: [tags[0]!] } }, { fields: [{ tags: [{ tags_id: ['name'] }] }] }),
+    );
+    expect(updated).toEqual({ tags: [{ tags_id: { name: 'edge' } }, { tags_id: { name: 'serverless' } }] });
+    // tags_id is RESTRICT now: a tag still linked can't be deleted
+    expect(await errorCode(admin.request(deleteItem('tags', tag.id)))).toBe('INVALID_FOREIGN_KEY');
+  });
+
+  it('deleteRelation()', async () => {
+    await admin.request(deleteRelation('posts', 'author'));
+    expect(await errorCode(admin.request(readRelation('posts', 'author')))).toBe('FORBIDDEN');
+    // The field stays, now without a relation.
+    expect(await admin.request(readItem('posts', ids.post!, { fields: ['author'] }))).toEqual({ author: ids.ada });
   });
 });

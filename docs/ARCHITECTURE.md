@@ -92,13 +92,13 @@ Tooling: pnpm 10 workspaces, TypeScript 5.9, Vitest 4 + `@cloudflare/vitest-plug
 
 ## 6. Data model — system tables
 
-Every system table uses the `cirrus_` prefix; user collections may not use it. The authoritative definition is [`apps/api/migrations/`](../apps/api/migrations/) (`0002` adds the full Directus collection/field meta, `0003` the Directus user fields, sessions and the guard table). The API exposes the access tables as Directus' system collections (`directus_users`, `directus_roles`, `directus_policies`, `directus_permissions`, `directus_access`), defined in code in `apps/api/src/system/collections.ts` (ADR-019).
+Every system table uses the `cirrus_` prefix; user collections may not use it. The authoritative definition is [`apps/api/migrations/`](../apps/api/migrations/) (`0002` adds the full Directus collection/field meta, `0003` the Directus user fields, sessions and the guard table, `0004` the relation meta and the batch keys table). The API exposes the access tables as Directus' system collections (`directus_users`, `directus_roles`, `directus_policies`, `directus_permissions`, `directus_access`), defined in code in `apps/api/src/system/collections.ts` (ADR-019).
 
 | Table | Purpose |
 |---|---|
 | `cirrus_collections` | One row per user collection (the real table name) or folder, plus the Directus collection meta (icon, note, hidden, singleton, sort field, group, …) |
 | `cirrus_fields` | Field metadata: type, column properties (primary/nullable/unique/indexed, default, auto-increment), Directus field meta (interface + options, special, validation, sort, group, …) |
-| `cirrus_relations` | `many_collection.many_field` → `one_collection`, optional O2M alias (`one_field`), junction field for M2M, `on_delete` |
+| `cirrus_relations` | `many_collection.many_field` → `one_collection`, optional O2M alias (`one_field`), junction field for M2M, O2M `sort_field`, `one_deselect_action`, `on_delete` (NULL: created with `schema: null`, nothing enforced) |
 | `cirrus_roles` | Roles, nestable via `parent` (child roles inherit policies) |
 | `cirrus_policies` | `admin_access`, `app_access`, `ip_access` (CIDR list), `enforce_tfa` |
 | `cirrus_access` | Attaches a policy to a role **or** a user; both NULL = public policy |
@@ -107,7 +107,8 @@ Every system table uses the `cirrus_` prefix; user collections may not use it. T
 | `cirrus_permissions` | Per policy × collection × action: allowed `fields`, row-level `permissions` filter, payload `validation`, `presets` |
 | `cirrus_files` | R2 storage key, filename, MIME type, size, dimensions, uploader |
 | `cirrus_settings` | Key/value JSON, including `schema_version` |
-| `cirrus_guard` | Never holds rows: guard statements insert into it to fail their batch (ADR-018) |
+| `cirrus_guard` | Never holds rows: guard statements insert into it to fail their batch (ADR-018); `ok` fails as FORBIDDEN, `fk` as INVALID_FOREIGN_KEY |
+| `cirrus_batch_keys` | Scratch keys passed between statements of one batch (ADR-023); the batch empties it as its last statement |
 
 JSON columns carry a `json_valid()` CHECK; booleans are `0/1` with CHECKs.
 
@@ -140,7 +141,8 @@ Every schema change is one `db.batch()`: DDL + metadata writes + a compare-and-s
 - **Add field:** `ALTER TABLE … ADD COLUMN`. A `NOT NULL` column without default only works while the table is empty (`CONTAINS_NULL_VALUES` otherwise); a non-constant default (`CURRENT_TIMESTAMP`) needs a rebuild.
 - **Drop field:** drop its index, then `ALTER TABLE … DROP COLUMN`.
 - **Rename field / collection:** not supported (Directus doesn't support it either).
-- **Change type / nullable / default (FK in M4):** the standard SQLite **table rebuild**:
+- **Relations:** metadata only (`cirrus_relations`), never DDL: user tables have no SQLite foreign keys (ADR-021), so creating or deleting a relation never rebuilds a table.
+- **Change type / nullable / default:** the standard SQLite **table rebuild**:
   1. `CREATE TABLE _new_x (…)` with the new schema
   2. `INSERT INTO _new_x SELECT … FROM x` (with casts)
   3. `DROP TABLE x`
@@ -185,7 +187,7 @@ Response: `{ "data": …, "meta": { "total_count", "filter_count" } }` (meta onl
 
 The system collections are served by the same code at their Directus paths: `/users`, `/roles`, `/policies`, `/permissions`, `/access`, plus `/users/me`, `/roles/me`, `/policies/me/globals`, `/permissions/me` and `/permissions/me/:collection/:id`. `/items/directus_*` is `FORBIDDEN`, as in Directus.
 
-Each request is one D1 round trip after the schema check: reads batch the data query with the count queries, writes run as one batch, so a write is all or nothing.
+Each request is one D1 round trip after the schema check: reads batch the data query with the queries for relational fields and the count queries, writes run as one batch, so a write is all or nothing.
 
 ### 8.2 Query parameters
 
@@ -193,14 +195,16 @@ Accepted as JSON strings (`filter={…}`), in bracket syntax (`filter[status][_e
 
 | Param | Example | Notes |
 |---|---|---|
-| `fields` | `fields=id,title` | `*` = every column; alias fields have no column and are skipped. Relational paths (`author.name`) come with M4 |
+| `fields` | `fields=title,author.name,comments.*` | `*` = every field the request may read: columns, and O2M aliases as lists of keys (other alias fields have no value and are skipped); `*.*` adds every relational field with its fields, as in Directus. Relational paths: §8.4 |
 | `filter` | `filter={"status":{"_eq":"published"}}` | §8.3 |
-| `sort` | `sort=-created_at,title` | default: the collection's `sort_field`, else the primary key; the primary key is always appended as a tiebreaker |
+| `sort` | `sort=-created_at,author.name` | default: the collection's `sort_field`, else the primary key; the primary key is always appended as a tiebreaker. Paths through M2O fields sort on the related item's value |
 | `limit` / `offset` / `page` | `limit=20&page=2` | default `QUERY_LIMIT_DEFAULT` (100); at most `QUERY_LIMIT_MAX` (1000, ADR-016), where `limit=-1` means that maximum; `page` wins over `offset` |
 | `search` | `search=hello` | string/text fields contain the term (ignoring case), numeric fields equal it when it is a number, UUID fields when it is a UUID; fields with `meta.searchable: false` are skipped |
 | `meta` | `meta=total_count,filter_count` or `meta=*` | |
-| `deep` | | accepted and ignored until relations (M4) |
+| `deep` | `deep={"comments":{"_limit":5,"_sort":"-date"}}` | the query of a relational field's items: `_filter`, `_search`, `_sort`, `_limit`, `_offset`, `_page` (O2M; an M2O only takes `_filter`), and the `deep` of their own relational fields. JSON or bracket syntax |
 | `aggregate` / `groupBy` / `alias` | | `INVALID_QUERY` ("not supported yet") rather than a silently different response |
+
+Paths into relations may have at most `MAX_RELATIONAL_DEPTH` segments (Directus' variable and default: 10, at least 2) in `fields`, `sort`, `filter` and `deep`; deeper ones are `INVALID_QUERY` ("Max relational depth exceeded").
 
 ### 8.3 Filter DSL
 
@@ -209,9 +213,10 @@ Accepted as JSON strings (`filter={…}`), in bracket syntax (`filter[status][_e
 - Comparison: `_eq`, `_neq`, `_lt`, `_lte`, `_gt`, `_gte`, `_in`, `_nin`, `_between`, `_nbetween`, `_null`, `_nnull`, `_empty`, `_nempty`. `_eq: null` / `_neq: null` test for NULL; otherwise SQL semantics apply (`_neq` and `_nin` don't match NULL), as in Directus.
 - String: `_contains`, `_starts_with`, `_ends_with` (case-sensitive, like Directus on Postgres), their `_i…` case-insensitive and `_n…` negated forms.
 - Values are converted to the field's storage form before comparing (§8.6): `"10"` for an integer field is 10, `"2024-01-05"` for a timestamp field is `2024-01-05T00:00:00.000Z`, so comparisons are correct, not textual accidents. Query-string values `true`, `false` and `null` are read as such.
-- Dynamic variables: `$NOW`, `$NOW(-1 year)` (units: years, months, weeks, days, hours, minutes, seconds and their short forms), `$CURRENT_USER`, `$CURRENT_ROLE`, `$CURRENT_ROLES` (the role and its ancestors), `$CURRENT_POLICIES`, and `$CURRENT_USER.<field>` / `$CURRENT_ROLE.<field>` (the user's record is read only when something refers to it; relational paths come with M4). Without a user they resolve to null / `[]`.
+- Relational filters (spec §9): `{ "author": { "name": { "_eq": "Ada" } } }` filters on the item an M2O points at, like Directus' LEFT JOIN: without one (or when the request may not read it) its fields are null, so `_null` matches; operators next to the fields still apply to the key. `{ "comments": { "_some": {…} } }` matches items with a related item matching, `_none` items with none; `{ "comments": {…} }` means `_some`. M2M goes through the junction (`{ "tags": { "tags_id": { "name": "x" } } }`). The related collections' read access applies inside: their row filter, and only the fields they grant (CASE WHEN for partial grants), so a filter can't reveal what a read couldn't. Permission filters may use relational paths too; they are compiled without those checks.
+- Dynamic variables: `$NOW`, `$NOW(-1 year)` (units: years, months, weeks, days, hours, minutes, seconds and their short forms), `$CURRENT_USER`, `$CURRENT_ROLE`, `$CURRENT_ROLES` (the role and its ancestors), `$CURRENT_POLICIES`, and `$CURRENT_USER.<path>` / `$CURRENT_ROLE.<path>`, paths through relations included (`$CURRENT_USER.role.name`; through an O2M, the list of values). The user's record is read only when something refers to it, with the paths referred to, like an item read as an admin (so concealed values stay masked). Without a user they resolve to null / `[]`.
 - Hashed and concealed fields (passwords, static tokens, `conceal` fields) can only be filtered with `_null` / `_nnull` and can't be sorted or searched, so their values can't be recovered by probing (Directus CVE-2023-27481). Permission filters may use them.
-- Not supported: `_regex` (SQLite has no regex function), geometry operators (no geometry type). Relational filters (`author.name`, `_some`, `_none`) come with M4.
+- Not supported: `_regex` (SQLite has no regex function), geometry operators (no geometry type), functions (`count(comments)`, `year(date)`).
 - Errors follow Directus: unknown fields are `FORBIDDEN` ("… or it does not exist."), malformed filters `INVALID_QUERY`.
 
 ### 8.4 Query builder
@@ -221,7 +226,9 @@ Pipeline: `parse params (parseQueryString) → sanitize (sanitizeQuery: defaults
 - Identifiers: only names present in metadata, quoted as `"…"`.
 - Values: always bind parameters.
 - Writes: `INSERT … SELECT … FROM json_each(?1) RETURNING pk` for creates; `UPDATE`/`DELETE … WHERE pk IN (…) RETURNING pk`, where `…` is a key, a JSON list of keys, or the keys a query selects (with its sort, limit and offset, as in Directus).
-- M4: M2O relations in `fields` via `LEFT JOIN`; O2M/M2M via a second query with `WHERE fk IN (…)`, merged in the app (avoids row duplication). Relation depth (default 3) is capped.
+- Relational paths compile to subqueries correlated with the row they start from (each related table under an alias such as `"_r1"`, which no collection name can be; the statement's own columns are qualified with its table name, so subqueries can refer to them): an M2O column is a scalar subquery on the related item (LEFT JOIN semantics, also for `sort=author.name`), an O2M filter is `EXISTS`. Sorting through an O2M is `INVALID_QUERY`: it would repeat items.
+- Relational fields (`read.ts`, ADR-022): each one is one more statement in the read's batch, selecting the related items of the rows the statement before it returns. That parent selection is repeated as a subquery (`WHERE "author_id" IN (SELECT … ORDER BY … LIMIT …)`) rather than passed as keys, so the whole read is one round trip and one consistent snapshot, and related rows are merged in the app, so items are never repeated the way a JOIN would. O2M items are limited per parent (`deep` `_limit`, default `QUERY_LIMIT_DEFAULT`, as in Directus) with `ROW_NUMBER() OVER (PARTITION BY fk …)`, ordered by `_sort`, else the relation's `sort_field`, else the key. Hidden columns carry what merging needs (`_key`, `_parent`, `_m0`, …; field names start with a letter, so they never collide).
+- Each related collection is read with the request's read access to it: its row filter, its granted fields (`*` expands to those), CASE WHEN for partially granted ones. An M2O the request may not read is null; an O2M alias granted on only some rows is null on the others. Relational fields that wildcards bring in are left out when the request may not read their collection; asking for one by name is FORBIDDEN.
 
 ### 8.5 D1 constraints
 
@@ -254,13 +261,15 @@ SQLite's `lower()` (and `LIKE`) fold ASCII letters only, so case-insensitive ope
 | date / time | `YYYY-MM-DD` (a time part is ignored) / `HH:MM[:SS]` | as shown |
 
 Payload processing (`apps/api/src/items/payload.ts`), following Directus' PayloadService:
-- Keys that aren't columns are ignored, as in Directus; alias fields (nested relational writes) come with M4.
+- Keys that aren't columns are ignored, as in Directus; relational fields are nested writes (below).
 - Specials: `uuid` (and UUID primary keys, ADR-007) get a UUIDv7 on create; `date-created` / `date-updated` are set on create / update; `user-created` / `user-updated` get the current user (null for public requests and `ADMIN_TOKEN`); `hash` fields (type or special) are hashed with PBKDF2-SHA256, 100 000 iterations (the most Workers allow), in PHC format; `conceal` fields read as `**********`.
 - String fields with a `max_length` are checked (`VALUE_TOO_LONG`), since SQLite doesn't enforce lengths.
 - The primary key can't be changed by an update.
 - Constraint errors map to Directus codes: `RECORD_NOT_UNIQUE`, `NOT_NULL_VIOLATION` (with `collection` and `field`).
 - Following Directus' processPayload, with permissions: the payload may only set fields the permission grants (`FORBIDDEN` with the field names otherwise), presets fill in what it leaves out, then field `meta.validation` rules (for everyone) and the permissions' `validation` must pass. Rules are filters checked in `packages/query/src/validate.ts` with the same value conversions as SQL filters: fields the payload leaves out pass, except with `_submitted`; `_regex` works here. Failures are `FAILED_VALIDATION` errors, one per failed rule, with Directus' messages and extensions (`field`, `type`, `valid`/`invalid`/`substring`). Hashing runs after validation. `meta.required` is enforced by the admin app, not the API, in Directus too.
-- Nested O2M writes, on the system aliases that support them (`roles.policies`, `roles.users`, `roles.children`, `users.policies`, `policies.permissions`; user collections in M4): an array replaces the related items (keys link, objects with a key update, objects without one create; items no longer listed are deleted or unlinked), or `{ create, update, delete }` changes them one by one. Every related write is checked against the related collection's permissions, and everything runs in the parent's batch.
+- Nested writes (Directus' processM2O/processO2M), on every relation, system ones included (`roles.users`, `users.role`, …). An M2O given as an object: with the related key it updates that item (only the key: links it), without one it creates it, before the parent, which gets its key. An O2M: an array replaces the related items (keys link, objects with a key update, objects without one create; items no longer listed are deselected, deleted or unlinked as the relation's `one_deselect_action` says), or `{ create, update, delete }` changes them one by one. M2M is an O2M to the junction, whose items' M2O objects reach the other side (`{ "tags": [{ "tags_id": { "name": "new" } }] }`). Every related write is checked against the related collection's permissions, and everything runs in the parent's batch, at most 5 levels deep.
+- New items whose auto-increment key nested writes need (their O2M items, or the M2O pointing at them) are inserted one at a time; the key is stashed in `cirrus_batch_keys` right after, and later statements read it from there (ADR-023). Other keys are known beforehand (UUIDv7 or given).
+- M2O keys must reference items (relations with a schema, ADR-021): a guard per field checks every key the write sets, in the same batch; otherwise `INVALID_FOREIGN_KEY` with the `collection` and `field`. Keys of items the batch creates, and a nested O2M's link to its parent, need no check.
 
 ### 8.7 Differences from Directus
 
@@ -273,17 +282,32 @@ Deliberate, where Directus' behavior is a quirk or doesn't fit D1:
 - Updates and deletes by query select rows within the permission's rows (others are left alone, not `FORBIDDEN`), and their query may filter on the fields the request may read. Directus selects with full access, then fails when a selected row isn't writable.
 - A permission's `validation` is satisfied when one granting policy's rule passes (policies are additive), field `meta.validation` always applies.
 - Nested updates through `{ update: [...] }` only reach items already linked to the parent; links to items that don't exist are `FORBIDDEN`, for admins too.
+- A nested M2O object with a key updates that item, which must exist; Directus creates it with that key when it doesn't.
+- `*` and `*.*` leave out relational fields whose collection the request may not read, rather than failing the read.
+- A relational filter applies the related collection's read access (row filter and fields); filters can't reach items a read couldn't.
+- Validation rules (`meta.validation`, permission `validation`) see the payload only, as in Directus: paths into related items pass.
 
 ## 9. Relations
 
+Implemented in M4: `apps/api/src/schema/relations.ts` (payloads, changes), `apps/api/src/routes/relations.ts`, the relational parts of `packages/query` (`sql.ts`, `read.ts`, the guards and batch keys in `compile.ts`) and of the items service (`apps/api/src/items`).
+
 | Type | Storage |
 |---|---|
-| M2O | FK column on the "many" table + one `cirrus_relations` row |
-| O2M | alias field on the "one" table, pointing back at the M2O relation |
-| M2M | junction table (two FKs) + two relations, an alias field on each side |
+| M2O | a column on the "many" collection holding the related key + one `cirrus_relations` row |
+| O2M | an alias field on the "one" collection, named by the M2O's relation (`one_field`) |
+| M2M | a junction collection with two M2O relations, each naming the other field as `junction_field`; each side's alias is an O2M to the junction |
 | M2A | later ❓ |
 
-Nested writes for O2M/M2M in Directus format (`{ create: [], update: [], delete: [] }`) come later.
+**API** (Directus shape): `GET /relations`, `/relations/:collection` (its M2O fields), `/relations/:collection/:field`; `POST /relations`, `PATCH` and `DELETE /relations/:collection/:field`, admin-only. A relation is `{ collection, field, related_collection, meta: { one_field, junction_field, sort_field, one_deselect_action, … }, schema }`. As in Directus, the field must exist first (and `one_field` must be an alias field of the related collection), its type must store keys like the related primary key (`integer` and `bigInteger` mix), and `schema: null` creates a relation nothing enforces; any other `schema` (or none) enforces it, with `on_delete` (`NO ACTION` by default, as a database foreign key). Non-admins see the relations whose fields they may read. Relations may point at user collections and at `directus_users`, `directus_roles` and `directus_policies`; the system collections' own relations (`directus_users.role`, `directus_roles.users`, `directus_access.policy`, …) are defined in code and work in queries, but aren't listed, like the system collections themselves.
+
+**Enforcement** (ADR-021): Cirrus keeps relations in the items service instead of SQLite foreign keys, in the same batch as the write:
+- keys an M2O is set to must reference items: one guard statement per field (§8.6);
+- deleting items applies `on_delete` to what points at them, as a database would: the doomed keys are stashed first (ADR-023), so every action and the delete see the same rows; `RESTRICT` fails when references exist, `CASCADE` deletes the referencing items (applying their own relations; self-references delete whole subtrees through a recursive CTE), `SET NULL` / `SET DEFAULT` reset the keys, and `NO ACTION` fails if references remain once the other actions ran. Failures are `INVALID_FOREIGN_KEY` with the referencing `collection` and `field`. Like a database's, these actions don't check the request's permissions. Cascades stop after 10 relations; deeper references fail the delete;
+- creating a relation (or giving it a schema) over a column whose values reference nothing is `INVALID_FOREIGN_KEY`.
+
+**Schema changes**, as in Directus: deleting an M2O field deletes its relation and the O2M alias on the other side; deleting an O2M alias leaves its relation without one; relations forget deleted junction and sort fields. Deleting a collection deletes its relations, the M2O fields of other collections pointing at it, and the aliases listing its items. A field holding keys can't change to a type the related key doesn't have.
+
+**Queries:** relational `fields`, `filter`, `sort` and `deep` (§8.2–8.4); nested writes (§8.6).
 
 ---
 
@@ -357,7 +381,7 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | **M1 – Schema** ✅ | Collections/fields API, DDL generator, schema snapshot | A `posts` collection can be created via the API |
 | **M2 – Items** ✅ | Dynamic CRUD + filter/sort/fields/pagination | CRUD on `posts` with nested `_and/_or` filters |
 | **M3 – Auth & RBAC** ✅ | Login, JWT, roles, policies, permissions + row-level | An "editor" role only sees its own posts |
-| **M4 – Relations** | M2O, O2M, M2M + nested `fields` | `posts.author.name`, `posts.tags.*` |
+| **M4 – Relations** ✅ | M2O, O2M, M2M + nested `fields`, relational filters, `deep`, nested writes, `on_delete` | `posts.author.name`, `posts.tags.*` |
 | **M5 – Files** | Upload/serve via R2 | A post can have a cover image |
 | **M6 – Admin UI MVP** | Data model + Content + Files | `posts` can be managed entirely through the UI |
 | **M7+** | Flows (Queues), realtime (DO), cache, schema snapshot, SDK | — |
@@ -370,7 +394,8 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 |---|---|---|
 | R1 | Rebuilding large tables may be slow or hit time limits | Warn in the UI; consider chunked rebuilds via Queues |
 | R2 | Schema snapshots drifting between isolates | Check `schema_version` in D1 on each request (one small, strongly consistent query) — ADR-012 |
-| R3 | Deep relational queries causing N+1 / CPU cost | Depth limit, batched `IN (…)` |
+| R3 | Deep relational queries causing N+1 / CPU cost | One statement per relational field, all in one batch (ADR-022); `MAX_RELATIONAL_DEPTH`; O2M items limited per parent. Each statement counts towards D1's queries per Worker invocation, so wide `*.*.*` reads can hit it |
+| R7 | Relations are only as consistent as the code path that writes items (ADR-021) | Every item write goes through the items service, which there is no way around in the API; tests cover each write and delete path |
 | R4 | D1's single writer under concurrent writes | Acceptable for single-project; monitor latency |
 | R5 | Combining row-level filters and field permissions across policies makes SQL complex (`CASE WHEN` per field) | One CASE per field and statement, sharing parameters; tested on SQLite in `packages/query` |
 | R6 | No login rate limiting yet: passwords can be guessed at the speed of PBKDF2 | Add a rate limit (Workers rate limiting binding or a Durable Object) before production use |
@@ -407,6 +432,9 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | ADR-018 | Writes that must check rows first put a guard statement before themselves in the same D1 batch: `INSERT INTO cirrus_guard SELECT 0 WHERE <violation>`, against a table whose CHECK always fails. D1 batches are transactions, so a violation rolls back everything, in one round trip, without the race of a separate read. Used for permissions on keys and queries, and for nested writes | ✅ Accepted |
 | ADR-019 | System collections (`directus_users`, `directus_roles`, `directus_policies`, `directus_permissions`, `directus_access`) are defined in code over the `cirrus_*` tables and served by the items service, so queries, permissions, errors and nested writes behave as for user collections. They aren't listed in `/collections` yet | ✅ Accepted |
 | ADR-020 | The public policy applies to requests without a user and to users without a role, as in Directus 11 (not to every request, as this document first said) | ✅ Accepted |
+| ADR-021 | Relations are kept by the items service, not by SQLite foreign keys (this document first planned foreign keys). D1 runs every batch in a transaction, so `PRAGMA foreign_keys = OFF` is a no-op, and `defer_foreign_keys` only defers checks: when a table rebuild (§7.2) drops a referenced table, SQLite's implicit `DELETE` runs the children's `ON DELETE CASCADE` / `SET NULL` on every row (verified on workerd's D1). Adding or dropping a constraint would also need a rebuild. Instead, writes check the M2O keys they set with guard statements and deletes apply `on_delete` themselves, in the same batch (as permissions do, ADR-018); relations are metadata, so schema changes never touch data. The system tables keep their own foreign keys, which nothing rebuilds | ✅ Accepted |
+| ADR-022 | Reads with relational fields run one statement per relational field in the same batch as the items, each repeating its parent selection as a subquery rather than receiving keys from a previous round trip: one round trip and one snapshot for any depth, at the cost of re-evaluating the parent query (SQLite materializes `IN (subquery)` once). O2M limits apply per parent, with `ROW_NUMBER()` | ✅ Accepted |
+| ADR-023 | `cirrus_batch_keys` passes keys between statements of one batch: the keys a delete removes (so on_delete actions can't change which rows it removes) and the auto-increment keys of items a nested write creates (read back with `max(key)`, which AUTOINCREMENT makes the new row's). D1 serializes writes and a batch empties the table as its last statement, so it never holds rows outside a transaction | ✅ Accepted |
 
 ---
 
@@ -435,7 +463,7 @@ Goal: a client written as `createDirectus(url).with(rest()).with(authentication(
 ### 17.3 Compatibility testing
 
 - A **contract test** suite runs the real `@directus/sdk` 21.3.0 against the local Worker via `@cloudflare/vitest-plugin`.
-- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`, `readCollections`, `readCollection`, `readFields`, `readFieldsByCollection`, `readField`, `updateCollection`, `updateCollectionsBatch`, `updateField`, `updateFields`, `deleteField`, `deleteCollection`; M2 → `readItems`, `readItem`, `createItem`, `createItems`, `updateItem`, `updateItems`, `updateItemsBatch`, `deleteItem`, `deleteItems`, `readSingleton`, `updateSingleton`, `withSearch`; M3 → `login` (command and `authentication()`), `refresh`, `logout`, `readMe`, `updateMe`, `readUsers`, `readUser`, `createUser(s)`, `updateUser`, `deleteUser`, `readRoles`, `readRole`, `readRolesMe`, `createRole`, `updateRole`, `deleteRole`, `readPolicies`, `readPolicy`, `readPolicyGlobals`, `createPolicy`, `updatePolicy`, `deletePolicy`, `readPermissions`, `readPermission`, `readUserPermissions`, `readItemPermissions`, `createPermission(s)`, `updatePermission`, `deletePermission`, `readProviders`; M5 → `uploadFiles`.
+- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`, `readCollections`, `readCollection`, `readFields`, `readFieldsByCollection`, `readField`, `updateCollection`, `updateCollectionsBatch`, `updateField`, `updateFields`, `deleteField`, `deleteCollection`; M2 → `readItems`, `readItem`, `createItem`, `createItems`, `updateItem`, `updateItems`, `updateItemsBatch`, `deleteItem`, `deleteItems`, `readSingleton`, `updateSingleton`, `withSearch`; M3 → `login` (command and `authentication()`), `refresh`, `logout`, `readMe`, `updateMe`, `readUsers`, `readUser`, `createUser(s)`, `updateUser`, `deleteUser`, `readRoles`, `readRole`, `readRolesMe`, `createRole`, `updateRole`, `deleteRole`, `readPolicies`, `readPolicy`, `readPolicyGlobals`, `createPolicy`, `updatePolicy`, `deletePolicy`, `readPermissions`, `readPermission`, `readUserPermissions`, `readItemPermissions`, `createPermission(s)`, `updatePermission`, `deletePermission`, `readProviders`; M4 → `createRelation`, `readRelations`, `readRelationByCollection`, `readRelation`, `updateRelation`, `deleteRelation`, and `createItem`, `readItems`, `readItem`, `updateItem` with relational fields (object syntax), filters, sorts and `deep`; M5 → `uploadFiles`.
 - With a real Directus available, send the same requests to both and compare response snapshots (ignoring ids and timestamps). The reference server uses the `directus/directus:11.17.4` image (not v12, which limits collections on the Core tier).
 - `@directus/sdk` is MIT-licensed; the licensing limits apply only to the Directus server, not to using the SDK as a test client.
 

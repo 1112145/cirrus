@@ -6,6 +6,7 @@ import { auth } from './routes/auth.ts';
 import { collections } from './routes/collections.ts';
 import { fields } from './routes/fields.ts';
 import { items } from './routes/items.ts';
+import { relations } from './routes/relations.ts';
 import { server } from './routes/server.ts';
 import { access, permissions, policies, roles, users } from './routes/system.ts';
 
@@ -17,6 +18,7 @@ app.route('/server', server);
 app.route('/auth', auth);
 app.route('/collections', collections);
 app.route('/fields', fields);
+app.route('/relations', relations);
 app.route('/items', items);
 app.route('/users', users);
 app.route('/roles', roles);
@@ -24,7 +26,6 @@ app.route('/policies', policies);
 app.route('/permissions', permissions);
 app.route('/access', access);
 
-// M4: /relations
 // M5: /files, /assets
 
 app.notFound(notFound);

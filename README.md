@@ -3,15 +3,15 @@
 A Directus-style headless CMS that runs entirely on Cloudflare (Workers + Hono, D1, R2, KV, Durable Objects, Queues).
 Its REST API is compatible with `@directus/sdk` 21.3.0 (Directus 11.17.4). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design.
 
-> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging) and M3 (auth: login, roles, policies, permissions down to rows and fields) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
+> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging), M3 (auth: login, roles, policies, permissions down to rows and fields) and M4 (relations: M2O, O2M, M2M, nested fields, relational filters, `deep`, nested writes, `on_delete`) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
 
 ## Layout
 
 ```
 apps/api/            Hono Worker
-  src/routes/        HTTP endpoints (/server, /auth, /collections, /fields, /items, /users, /roles, /policies, /permissions, /access)
-  src/schema/        schema snapshot, Directus payload mapping, schema-change service
-  src/items/         items service: payload processing, permission checks, reads, writes, nested writes
+  src/routes/        HTTP endpoints (/server, /auth, /collections, /fields, /relations, /items, /users, /roles, /policies, /permissions, /access)
+  src/schema/        schema snapshot, Directus payload mapping, schema-change service, relations
+  src/items/         items service: payload processing, permission checks, reads, writes, nested writes, on_delete
   src/access/        roles/policies/permissions snapshot, the policies of a request, app access permissions
   src/auth/          login, refresh and logout (JWT access tokens, rotating refresh tokens)
   src/system/        system collections (directus_users, …) over the cirrus_* tables
@@ -21,7 +21,7 @@ apps/api/            Hono Worker
   wrangler.jsonc
 packages/shared/     Directus-style error codes, UUIDv7, PBKDF2 hashing, JWT, tokens, IP ranges
 packages/schema/     field types → SQLite, value codecs, DDL generator, migration planner (pure)
-packages/query/      Directus query parsing, filter → SQL compiler with permissions, item statements, payload validation (pure)
+packages/query/      Directus query parsing, filter → SQL compiler with permissions and relations, nested reads, item statements, payload validation (pure)
 docs/                architecture and decision log
 ```
 
@@ -71,6 +71,24 @@ curl -g 'http://localhost:8787/items/posts?filter[title][_icontains]=hello&sort=
   -H "Authorization: Bearer $TOKEN"
 ```
 
+Relate collections like Directus: create the fields, then the relation (`one_field` names the O2M alias on the
+other side; `schema.on_delete` says what deleting an author does to their posts):
+
+```bash
+curl -X POST http://localhost:8787/collections \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"collection":"authors","schema":{},"fields":[{"field":"name","type":"string"},{"field":"posts","type":"alias","meta":{"special":["o2m"]}}]}'
+curl -X POST http://localhost:8787/fields/posts \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"field":"author","type":"uuid"}'
+curl -X POST http://localhost:8787/relations \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"collection":"posts","field":"author","related_collection":"authors","meta":{"one_field":"posts"},"schema":{"on_delete":"SET NULL"}}'
+curl -X POST 'http://localhost:8787/items/authors?fields=name,posts.title' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name":"Ada","posts":[{"title":"Hi"}]}'
+curl -g 'http://localhost:8787/items/posts?fields=title,author.name&filter[author][name][_eq]=Ada' \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 Non-admins need permissions: create a policy with `/policies` and `/permissions` (row filters such as
 `{ "author": { "_eq": "$CURRENT_USER" } }`, allowed fields, validation, presets), attach it to a role or a user
 (`/roles` with `policies: [{ "policy": "<id>" }]`, or `/access`), and give users that role. Requests without a
@@ -97,6 +115,10 @@ pnpm deploy
 - Items reads and writes go through `apps/api/src/items/service.ts`, which applies the request's permissions; system collections (`directus_users`, …) are defined in `apps/api/src/system/collections.ts` and use the same service.
 - A write that must check rows first (permissions, nested writes) puts a guard statement (`guardItems()` in `@cirrus/query`) before itself in the same batch, so D1 rolls everything back when a row doesn't qualify.
 - Writes to roles, policies, access and permissions replace `schema_version`, so every isolate reloads the snapshot.
+- Relations are kept by the items service, not by SQLite foreign keys (ADR-021): writes setting M2O keys add a
+  `foreignKeyGuard()`, and deletes go through `planDelete()`, which applies `on_delete`. A batch that stashes keys
+  (`stashKeys()`, `stashNewKey()`) ends with `clearKeys()`; `Batch` in `items/service.ts` does that.
+- Pass the request's `related` resolver in every `Scope`, so relational filters (permissions' too) compile.
 - Every new endpoint needs a contract test in `apps/api/test/contract/`.
 - `compatibility_date` in `wrangler.jsonc` must not exceed the date supported by the workerd bundled with `@cloudflare/vitest-plugin`.
 
@@ -108,7 +130,7 @@ pnpm deploy
 | M1 – Schema (collections/fields) | ✅ |
 | M2 – Items | ✅ |
 | M3 – Auth & RBAC | ✅ |
-| M4 – Relations | ⏳ |
-| M5 – Files | |
+| M4 – Relations | ✅ |
+| M5 – Files | ⏳ |
 | M6 – Admin UI MVP | |
 | M7+ – Extensions | |

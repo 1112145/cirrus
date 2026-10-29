@@ -149,7 +149,7 @@ async function itemPermissions(c: Context<AppEnv>) {
   const exists = async (action: Action) => {
     const access = ctx.access(action)!;
     const target = key === null ? { query: { filter: null, search: null, sort: null, limit: 1, offset: 0 } } : { key };
-    const s = selectKeys(ctx.info, target, { restrict: access.filter });
+    const s = selectKeys(ctx.info, target, { restrict: access.filter, related: ctx.related });
     return (await ctx.db.prepare(s.sql).bind(...s.params).all()).results.length > 0;
   };
   const check = async (action: Action) => ctx.can(action) && (key !== null || singleton ? await exists(action) : true);
