@@ -13,6 +13,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@cirrus/query": "workspace:*",
     "@cirrus/schema": "workspace:*",
     "@cirrus/shared": "workspace:*",
     "hono": "4.13.14"

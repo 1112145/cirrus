@@ -1,5 +1,7 @@
 import type { JsonValue } from '@cirrus/schema';
-import { invalidPayload } from '@cirrus/shared';
+import { invalidPayload, isPlainObject } from '@cirrus/shared';
+
+export { isPlainObject };
 
 /**
  * Directus collection/field `meta` properties. One spec per property drives API validation,
@@ -15,9 +17,6 @@ type Codec<T> = {
   toDb(v: T): DbValue;
   fromDb(v: unknown): T;
 };
-
-export const isPlainObject = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
 
 const text: Codec<string | null> = {
   expected: 'a string or null',

@@ -9,7 +9,11 @@
 
   "vars": {
     "PROJECT_NAME": "Cirrus",
-    "DEFAULT_LANGUAGE": "en-US"
+    "DEFAULT_LANGUAGE": "en-US",
+    // Items per request when none is asked for, and the most a request may ask for (-1 = no maximum).
+    // Keep the maximum modest: every row is serialized within the Worker's CPU and memory limits.
+    "QUERY_LIMIT_DEFAULT": "100",
+    "QUERY_LIMIT_MAX": "1000"
   },
 
   // database_id: replace with the real ID after running `wrangler d1 create cirrus`

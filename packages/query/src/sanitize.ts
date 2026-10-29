@@ -1,0 +1,211 @@
+import { invalidQuery, isPlainObject } from '@cirrus/shared';
+import type { Filter, MetaKey, Query } from './types.ts';
+
+/**
+ * Raw Directus query parameters (from the query string or a SEARCH body) → a validated Query.
+ * Mirrors Directus' sanitizeQuery/validateQuery; checks that need the schema happen in compile.ts.
+ */
+
+export type FilterVariables = {
+  /** `$NOW`; one value per request. */
+  now: Date;
+  /** `$CURRENT_USER`, `$CURRENT_ROLE`, … arrive with users in M3; until then they resolve to null / []. */
+  user?: string | null;
+  role?: string | null;
+  roles?: string[];
+  policies?: string[];
+};
+
+export type SanitizeOptions = {
+  /** Rows returned when the request sets no limit (Directus QUERY_LIMIT_DEFAULT). */
+  limitDefault: number;
+  /** Largest allowed limit, -1 for none (Directus QUERY_LIMIT_MAX). With a maximum, limit=-1 means the maximum. */
+  limitMax: number;
+  variables: FilterVariables;
+};
+
+/** Parameters that would change the response shape; refusing them beats silently ignoring them. */
+const UNSUPPORTED = ['aggregate', 'groupBy', 'alias'];
+
+export function sanitizeQuery(raw: Record<string, unknown>, opts: SanitizeOptions): Query {
+  for (const key of UNSUPPORTED) {
+    if (raw[key] !== undefined) throw invalidQuery(`"${key}" is not supported yet`);
+  }
+  const limit = sanitizeLimit(raw.limit, opts);
+  const offset = sanitizeInteger(raw.offset, 'offset', 0) ?? 0;
+  const page = sanitizeInteger(raw.page, 'page', 0);
+  return {
+    fields: sanitizeList(raw.fields, 'fields') ?? ['*'],
+    filter: sanitizeFilter(raw.filter, opts.variables),
+    search: sanitizeSearch(raw.search),
+    sort: sanitizeList(raw.sort, 'sort'),
+    limit,
+    // As in Directus, page wins over offset.
+    offset: page !== null && page > 1 && limit !== -1 ? limit * (page - 1) : offset,
+    meta: sanitizeMeta(raw.meta),
+  };
+}
+
+/** "a,b" or ["a", "b,c"] → ["a", "b", "c"]; null when absent or empty. */
+function sanitizeList(v: unknown, name: string): string[] | null {
+  if (v === undefined || v === null) return null;
+  const items = typeof v === 'string' ? [v] : v;
+  if (!Array.isArray(items) || !items.every((x) => typeof x === 'string')) {
+    throw invalidQuery(`"${name}" must be a string or an array of strings`);
+  }
+  const list = items.flatMap((s) => s.split(',')).map((s) => s.trim()).filter(Boolean);
+  return list.length ? list : null;
+}
+
+function toInteger(v: unknown, name: string): number {
+  const n = typeof v === 'number' ? v : typeof v === 'string' && /^\s*-?\d+\s*$/.test(v) ? Number(v) : NaN;
+  if (!Number.isSafeInteger(n)) throw invalidQuery(`"${name}" must be an integer`);
+  return n;
+}
+
+function sanitizeInteger(v: unknown, name: string, min: number): number | null {
+  if (v === undefined || v === null || v === '') return null;
+  const n = toInteger(v, name);
+  if (n < min) throw invalidQuery(`"${name}" must be greater than or equal to ${min}`);
+  return n;
+}
+
+function sanitizeLimit(v: unknown, { limitDefault, limitMax }: SanitizeOptions): number {
+  const max = limitMax < 0 ? Infinity : limitMax;
+  const n = sanitizeInteger(v, 'limit', -1);
+  if (n === null) return Math.min(limitDefault, max);
+  if (n === -1) return Number.isFinite(max) ? max : -1;
+  if (n > max) throw invalidQuery(`"limit" must be less than or equal to ${max}`);
+  return n;
+}
+
+function sanitizeSearch(v: unknown): string | null {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v !== 'string') throw invalidQuery('"search" must be a string');
+  return v;
+}
+
+function sanitizeMeta(v: unknown): MetaKey[] {
+  const list = sanitizeList(v, 'meta') ?? [];
+  const out = new Set<MetaKey>();
+  for (const item of list) {
+    if (item === '*') {
+      out.add('total_count').add('filter_count');
+    } else if (item === 'total_count' || item === 'filter_count') {
+      out.add(item);
+    } else {
+      throw invalidQuery('"meta" must be "total_count", "filter_count" or "*"');
+    }
+  }
+  return [...out];
+}
+
+function sanitizeFilter(v: unknown, vars: FilterVariables): Filter | null {
+  if (v === undefined || v === null || v === '') return null;
+  let filter = v;
+  if (typeof filter === 'string') {
+    try {
+      filter = JSON.parse(filter);
+    } catch {
+      throw invalidQuery('Invalid JSON for filter object');
+    }
+  }
+  if (!isPlainObject(filter)) throw invalidQuery('Invalid filter object');
+  return parseFilter(filter, vars);
+}
+
+// Filters ----------------------------------------------------------------------------------------
+
+const LIST_OPERATORS = new Set(['_in', '_nin', '_between', '_nbetween']);
+/** Deeper filters are refused rather than risking the call stack. */
+const MAX_FILTER_DEPTH = 32;
+
+/**
+ * Directus parseFilter: resolve dynamic variables, read "true"/"false"/"null" from the query string
+ * as values, and split comma-separated lists. Structure and types are checked in compile.ts.
+ */
+export function parseFilter(filter: Record<string, unknown>, vars: FilterVariables, depth = 0): Filter {
+  if (depth > MAX_FILTER_DEPTH) throw invalidQuery('The filter is nested too deeply');
+  const out: Filter = Object.create(null);
+  for (const [key, value] of Object.entries(filter)) {
+    if (key === '_and' || key === '_or') {
+      if (!Array.isArray(value)) throw invalidQuery(`"${key}" has to be an array of filters`);
+      out[key] = value.map((f, i) => {
+        if (!isPlainObject(f)) throw invalidQuery(`"${key}[${i}]" has to be a filter object`);
+        return parseFilter(f, vars, depth + 1);
+      });
+    } else if (LIST_OPERATORS.has(key)) {
+      const list = typeof value === 'string' ? value.split(',') : Array.isArray(value) ? value : [value];
+      if (list.length === 0) throw invalidQuery(`"${key}" has to be an array of values`);
+      out[key] = list.flatMap((x) => parseValue(x, vars));
+    } else if (key.startsWith('_') || !isPlainObject(value)) {
+      out[key] = parseValue(value, vars);
+    } else {
+      out[key] = parseFilter(value, vars, depth + 1);
+    }
+  }
+  return out;
+}
+
+function parseValue(v: unknown, vars: FilterVariables): unknown {
+  if (typeof v !== 'string') return v;
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  if (v === 'null' || v === 'NULL') return null;
+  if (v.startsWith('$NOW')) return parseNow(v, vars.now);
+  switch (v) {
+    case '$CURRENT_USER':
+      return vars.user ?? null;
+    case '$CURRENT_ROLE':
+      return vars.role ?? null;
+    case '$CURRENT_ROLES':
+      return vars.roles ?? [];
+    case '$CURRENT_POLICIES':
+      return vars.policies ?? [];
+  }
+  // $CURRENT_USER.<field> / $CURRENT_ROLE.<field> read the user or role record (M3).
+  if (v.startsWith('$CURRENT_USER.') || v.startsWith('$CURRENT_ROLE.')) return null;
+  return v;
+}
+
+/** `$NOW` or `$NOW(<adjustment>)`, e.g. `$NOW(-1 year)`. */
+function parseNow(v: string, now: Date): unknown {
+  const m = /^\$NOW(?:\((.*)\))?$/.exec(v);
+  if (!m) return v;
+  const adjustment = m[1]?.trim();
+  if (!adjustment) return new Date(now);
+  const date = adjustDate(now, adjustment);
+  if (!date) throw invalidQuery(`Invalid date adjustment "${adjustment}" in "${v}"`);
+  return date;
+}
+
+const UNITS: Record<string, 'years' | 'months' | 'weeks' | 'days' | 'hours' | 'minutes' | 'seconds'> = {
+  years: 'years', year: 'years', y: 'years',
+  months: 'months', month: 'months', M: 'months',
+  weeks: 'weeks', week: 'weeks', w: 'weeks',
+  days: 'days', day: 'days', d: 'days',
+  hours: 'hours', hour: 'hours', h: 'hours',
+  minutes: 'minutes', minute: 'minutes', mins: 'minutes', min: 'minutes', m: 'minutes',
+  seconds: 'seconds', second: 'seconds', secs: 'seconds', sec: 'seconds', s: 'seconds',
+};
+
+const MS = { weeks: 604_800_000, days: 86_400_000, hours: 3_600_000, minutes: 60_000, seconds: 1000 };
+
+/** Directus adjustDate: "+2 days", "-1 year", "3 hours". Months and years keep the day within the month. */
+export function adjustDate(date: Date, adjustment: string): Date | null {
+  const m = /^([+-])?\s*(\d+)\s*([a-zA-Z]+)$/.exec(adjustment.trim());
+  const unit = m && UNITS[m[3]!];
+  if (!m || !unit) return null;
+  const amount = Number(m[2]) * (m[1] === '-' ? -1 : 1);
+
+  if (unit === 'months' || unit === 'years') {
+    const months = unit === 'years' ? amount * 12 : amount;
+    const d = new Date(date);
+    const day = d.getUTCDate();
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() + months);
+    d.setUTCDate(Math.min(day, new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate()));
+    return d;
+  }
+  return new Date(date.getTime() + amount * MS[unit]);
+}
