@@ -6,14 +6,21 @@ import {
   createCollection,
   createDirectus,
   createField,
+  createItem,
+  createItems,
   deleteCollection,
   deleteField,
+  deleteItem,
+  deleteItems,
   isDirectusError,
   readCollection,
   readCollections,
   readField,
   readFields,
   readFieldsByCollection,
+  readItem,
+  readItems,
+  readSingleton,
   rest,
   serverHealth,
   serverInfo,
@@ -23,6 +30,11 @@ import {
   updateCollectionsBatch,
   updateField,
   updateFields,
+  updateItem,
+  updateItems,
+  updateItemsBatch,
+  updateSingleton,
+  withSearch,
 } from '@directus/sdk';
 import { describe, expect, it } from 'vitest';
 import { ADMIN_TOKEN, BASE, tableSql, workerFetch } from '../helpers.ts';
@@ -167,5 +179,132 @@ describe('@directus/sdk contract — M1', () => {
     await admin.request(deleteCollection('posts'));
     expect(await errorCode(admin.request(readCollection('posts')))).toBe('FORBIDDEN');
     expect(await tableSql('posts')).toBeNull();
+  });
+});
+
+describe('@directus/sdk contract — M2', () => {
+  // Done when: CRUD on `posts` with nested _and/_or filters.
+  type Post = { id: string; title: string; status: string; views: number; featured: boolean; tags: string[] | null };
+  const ids: Record<string, string> = {};
+
+  it('createItem() / createItems()', async () => {
+    await admin.request(
+      createCollection({
+        collection: 'posts',
+        schema: {},
+        fields: [
+          { field: 'title', type: 'string', schema: { is_nullable: false } },
+          { field: 'status', type: 'string', schema: { default_value: 'draft' } },
+          { field: 'views', type: 'integer', schema: { default_value: 0 } },
+          { field: 'featured', type: 'boolean', schema: { default_value: false } },
+          { field: 'tags', type: 'csv', meta: { special: ['cast-csv'] } },
+        ],
+      }),
+    );
+
+    const first = (await admin.request(createItem('posts', { title: 'Hello', status: 'published', views: 10, tags: ['intro'] }))) as Post;
+    expect(first).toMatchObject({ title: 'Hello', status: 'published', views: 10, featured: false, tags: ['intro'] });
+    ids.hello = first.id;
+
+    const more = (await admin.request(
+      createItems(
+        'posts',
+        [
+          { title: 'Popular', status: 'published', views: 500, featured: true },
+          { title: 'Draft', views: 3 },
+          { title: 'Old news', status: 'archived', views: 900 },
+        ],
+        { fields: ['id', 'title'] },
+      ),
+    )) as Array<Pick<Post, 'id' | 'title'>>;
+    expect(more.map((p) => p.title)).toEqual(['Popular', 'Draft', 'Old news']);
+    for (const p of more) ids[p.title] = p.id;
+  });
+
+  it('readItems() with nested _and / _or filters, fields, sort and paging', async () => {
+    const posts = (await admin.request(
+      readItems('posts', {
+        fields: ['title', 'views'],
+        filter: {
+          _and: [
+            { _or: [{ status: { _eq: 'published' } }, { views: { _gte: 800 } }] },
+            { _or: [{ featured: { _eq: true } }, { title: { _icontains: 'NEWS' } }, { tags: { _null: true } }] },
+          ],
+        },
+        sort: ['-views'],
+      }),
+    )) as Array<Pick<Post, 'title' | 'views'>>;
+    expect(posts).toEqual([
+      { title: 'Old news', views: 900 },
+      { title: 'Popular', views: 500 },
+    ]);
+
+    const page = await admin.request(readItems('posts', { fields: ['title'], sort: ['views'], limit: 2, page: 2 }));
+    expect(page).toEqual([{ title: 'Popular' }, { title: 'Old news' }]);
+    expect(await admin.request(readItems('posts', { fields: ['title'], search: 'draft' }))).toEqual([{ title: 'Draft' }]);
+  });
+
+  it('readItem()', async () => {
+    expect(await admin.request(readItem('posts', ids.hello!, { fields: ['title', 'tags'] }))).toEqual({ title: 'Hello', tags: ['intro'] });
+  });
+
+  it('withSearch(readItems())', async () => {
+    const posts = await admin.request(withSearch(readItems('posts', { fields: ['title'], filter: { views: { _between: [5, 600] } } })));
+    expect(posts).toEqual([{ title: 'Hello' }, { title: 'Popular' }]);
+  });
+
+  it('updateItem() / updateItems() / updateItemsBatch()', async () => {
+    expect(await admin.request(updateItem('posts', ids.Draft!, { status: 'published' }, { fields: ['status'] }))).toEqual({ status: 'published' });
+
+    const byKeys = await admin.request(updateItems('posts', [ids.hello!, ids.Popular!], { featured: true }, { fields: ['title', 'featured'] }));
+    expect(byKeys).toEqual([
+      { title: 'Hello', featured: true },
+      { title: 'Popular', featured: true },
+    ]);
+
+    const byQuery = await admin.request(updateItems('posts', { filter: { status: { _eq: 'archived' } } }, { views: 0 }, { fields: ['title', 'views'] }));
+    expect(byQuery).toEqual([{ title: 'Old news', views: 0 }]);
+
+    const batch = await admin.request(
+      updateItemsBatch('posts', [
+        { id: ids.hello, views: 11 },
+        { id: ids.Draft, views: 4 },
+      ], { fields: ['title', 'views'] }),
+    );
+    expect(batch).toEqual([
+      { title: 'Hello', views: 11 },
+      { title: 'Draft', views: 4 },
+    ]);
+  });
+
+  it('deleteItem() / deleteItems()', async () => {
+    await admin.request(deleteItem('posts', ids['Old news']!));
+    expect(await errorCode(admin.request(readItem('posts', ids['Old news']!)))).toBe('FORBIDDEN');
+
+    await admin.request(deleteItems('posts', [ids.Draft!]));
+    await admin.request(deleteItems('posts', { filter: { _or: [{ title: { _eq: 'Popular' } }, { views: { _gt: 1000 } }] } }));
+    expect(await admin.request(readItems('posts', { fields: ['title'] }))).toEqual([{ title: 'Hello' }]);
+  });
+
+  it('readSingleton() / updateSingleton()', async () => {
+    await admin.request(
+      createCollection({
+        collection: 'settings_page',
+        meta: { singleton: true },
+        schema: {},
+        fields: [{ field: 'headline', type: 'string', schema: { default_value: 'Welcome' } }],
+      }),
+    );
+    expect(await admin.request(readSingleton('settings_page', { fields: ['headline'] }))).toEqual({ headline: 'Welcome' });
+    expect(await admin.request(updateSingleton('settings_page', { headline: 'Hi' }, { fields: ['headline'] }))).toEqual({ headline: 'Hi' });
+    expect(await admin.request(readSingleton('settings_page', { fields: ['headline'] }))).toEqual({ headline: 'Hi' });
+  });
+
+  it('errors use Directus codes', async () => {
+    expect(await errorCode(client.request(readItems('posts')))).toBe('FORBIDDEN');
+    expect(await errorCode(admin.request(readItems('nope')))).toBe('FORBIDDEN');
+    expect(await errorCode(admin.request(readItems('posts', { fields: ['nope'] })))).toBe('FORBIDDEN');
+    expect(await errorCode(admin.request(readItems('posts', { filter: { views: { _gt: 'many' } } })))).toBe('INVALID_QUERY');
+    expect(await errorCode(admin.request(createItem('posts', { status: 'x' })))).toBe('NOT_NULL_VIOLATION');
   });
 });

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { CirrusError, forbidden, invalidPayload, isUuid, uuidv7, uuidv7Timestamp } from '../src/index.ts';
+import {
+  CirrusError,
+  forbidden,
+  hashSecret,
+  invalidPayload,
+  invalidQuery,
+  isPlainObject,
+  isUuid,
+  routeNotFound,
+  uuidv7,
+  uuidv7Timestamp,
+  verifySecret,
+} from '../src/index.ts';
 
 describe('uuidv7', () => {
   it('has a valid format and version 7', () => {
@@ -57,5 +69,60 @@ describe('error helpers', () => {
 
   it('forbidden is a 403', () => {
     expect(forbidden().status).toBe(403);
+  });
+});
+
+describe('more error helpers', () => {
+  it('invalidQuery follows the Directus message format', () => {
+    expect(invalidQuery('"limit" must be an integer').toBody()).toEqual({
+      errors: [
+        {
+          message: 'Invalid query. "limit" must be an integer.',
+          extensions: { reason: '"limit" must be an integer', code: 'INVALID_QUERY' },
+        },
+      ],
+    });
+  });
+
+  it('forbidden can carry a reason', () => {
+    expect(forbidden('Nope.').toBody().errors[0]!.extensions).toEqual({ reason: 'Nope.', code: 'FORBIDDEN' });
+    expect(forbidden().toBody().errors[0]!.extensions).toEqual({ code: 'FORBIDDEN' });
+  });
+
+  it('routeNotFound names the path', () => {
+    expect(routeNotFound('/x').toBody().errors[0]).toEqual({
+      message: "Route /x doesn't exist.",
+      extensions: { path: '/x', code: 'ROUTE_NOT_FOUND' },
+    });
+  });
+});
+
+describe('isPlainObject', () => {
+  it.each([
+    [{}, true],
+    [Object.create(null), true],
+    [JSON.parse('{"a":1}'), true],
+    [[], false],
+    [null, false],
+    [new Date(), false],
+    ['x', false],
+  ])('%j → %s', (v, expected) => {
+    expect(isPlainObject(v)).toBe(expected);
+  });
+});
+
+describe('hashSecret / verifySecret', () => {
+  it('hashes with a random salt and verifies', async () => {
+    const a = await hashSecret('correct horse');
+    const b = await hashSecret('correct horse');
+    expect(a).toMatch(/^\$pbkdf2-sha256\$i=100000\$[A-Za-z0-9+/]{22}\$[A-Za-z0-9+/]{43}$/);
+    expect(a).not.toBe(b);
+    expect(await verifySecret('correct horse', a)).toBe(true);
+    expect(await verifySecret('wrong horse', a)).toBe(false);
+  });
+
+  it('rejects malformed hashes', async () => {
+    expect(await verifySecret('x', 'plain text')).toBe(false);
+    expect(await verifySecret('x', '$pbkdf2-sha256$i=999999999$AAAA$AAAA')).toBe(false);
   });
 });

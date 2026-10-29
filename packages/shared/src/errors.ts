@@ -59,5 +59,16 @@ export const isCirrusError = (e: unknown): e is CirrusError => e instanceof Cirr
 export const invalidPayload = (reason: string) =>
   new CirrusError('INVALID_PAYLOAD', `Invalid payload. ${reason}.`, { reason });
 
-/** Directus ForbiddenError. Also used for things that don't exist, so their existence isn't leaked. */
-export const forbidden = () => new CirrusError('FORBIDDEN', "You don't have permission to access this.");
+/** Directus InvalidQueryError: "Invalid query. <reason>." with extensions.reason. */
+export const invalidQuery = (reason: string) =>
+  new CirrusError('INVALID_QUERY', `Invalid query. ${reason}.`, { reason });
+
+/**
+ * Directus ForbiddenError, with an optional extensions.reason. Also used for things that don't exist,
+ * so their existence isn't leaked.
+ */
+export const forbidden = (reason?: string) =>
+  new CirrusError('FORBIDDEN', "You don't have permission to access this.", reason ? { reason } : {});
+
+/** Directus RouteNotFoundError. */
+export const routeNotFound = (path: string) => new CirrusError('ROUTE_NOT_FOUND', `Route ${path} doesn't exist.`, { path });

@@ -79,7 +79,7 @@ cirrus/
 │  └─ admin/          # Vue 3 (Vite) SPA — M6
 └─ packages/
    ├─ shared/         # Directus error codes, UUIDv7, types, zod schemas, filter DSL types
-   ├─ query/          # filter → SQL builder (pure, testable without D1) — M2
+   ├─ query/          # query parsing, filter → SQL builder, item statements (pure; tests run the SQL on node:sqlite) — M2
    ├─ schema/         # type mapping, DDL generator, migration planner (pure; tests run the SQL on node:sqlite) — M1
    └─ sdk/            # TypeScript client SDK — M7+
 ```
@@ -164,51 +164,106 @@ Later: `GET /schema/snapshot` + `POST /schema/apply` to version the schema in gi
 
 ## 8. Items API
 
+Implemented in M2: `packages/query` (pure: query parsing, filter → SQL, item statements; tests run the SQL on Node's SQLite) and `apps/api/src/items` (payload processing, the service, D1 execution). Until permissions land (M3), items are admin-only, like Directus' public role, which starts with no permissions.
+
 ### 8.1 Endpoints
 
 ```
-GET    /items/:collection            list
+GET    /items/:collection            list (a singleton: its one item)
+SEARCH /items/:collection            list with { query } in the body, or read { keys }
 GET    /items/:collection/:id        get one
 POST   /items/:collection            create (object or array)
 PATCH  /items/:collection/:id        update one
-PATCH  /items/:collection            update many (keys + data)
+PATCH  /items/:collection            update many: [items with keys] | { keys, data } | { query, data }; a singleton: upsert
 DELETE /items/:collection/:id        delete one
-DELETE /items/:collection            delete many
+DELETE /items/:collection            delete many: [keys] | { keys } | { query }
 ```
 
-Response: `{ "data": …, "meta": { "total_count", "filter_count" } }` (meta only when requested).
+Response: `{ "data": …, "meta": { "total_count", "filter_count" } }` (meta only when requested). Writes answer with the written items as the request's query reads them (`?fields=` …), or 204 when that query matches none of them; deletes answer 204. As in Directus, collections that don't exist (and folders) are `FORBIDDEN`, and so are items that don't exist; updates and deletes by keys or query skip missing items. By query, they apply to the rows the query selects, so its limit (default 100) applies, as in Directus.
+
+Each request is one D1 round trip after the schema check: reads batch the data query with the count queries, writes run as one batch, so a write is all or nothing.
 
 ### 8.2 Query parameters
 
-| Param | Example |
-|---|---|
-| `fields` | `fields=id,title,author.name,tags.*` |
-| `filter` | `filter={"status":{"_eq":"published"}}` |
-| `sort` | `sort=-created_at,title` |
-| `limit` / `offset` / `page` | `limit=20&page=2` |
-| `search` | simple full-text (LIKE on string fields) |
-| `meta` | `meta=total_count,filter_count` |
-| `aggregate` / `groupBy` | later |
+Accepted as JSON strings (`filter={…}`), in bracket syntax (`filter[status][_eq]=x`, `fields[]=a`), or as a SEARCH body.
+
+| Param | Example | Notes |
+|---|---|---|
+| `fields` | `fields=id,title` | `*` = every column; alias fields have no column and are skipped. Relational paths (`author.name`) come with M4 |
+| `filter` | `filter={"status":{"_eq":"published"}}` | §8.3 |
+| `sort` | `sort=-created_at,title` | default: the collection's `sort_field`, else the primary key; the primary key is always appended as a tiebreaker |
+| `limit` / `offset` / `page` | `limit=20&page=2` | default `QUERY_LIMIT_DEFAULT` (100); at most `QUERY_LIMIT_MAX` (1000, ADR-016), where `limit=-1` means that maximum; `page` wins over `offset` |
+| `search` | `search=hello` | string/text fields contain the term (ignoring case), numeric fields equal it when it is a number, UUID fields when it is a UUID; fields with `meta.searchable: false` are skipped |
+| `meta` | `meta=total_count,filter_count` or `meta=*` | |
+| `deep` | | accepted and ignored until relations (M4) |
+| `aggregate` / `groupBy` / `alias` | | `INVALID_QUERY` ("not supported yet") rather than a silently different response |
 
 ### 8.3 Filter DSL
 
-- Logical: `_and`, `_or`
-- Comparison: `_eq`, `_neq`, `_lt`, `_lte`, `_gt`, `_gte`, `_in`, `_nin`, `_null`, `_nnull`, `_between`
-- String: `_contains`, `_icontains`, `_starts_with`, `_ends_with`
-- Relational: path filters such as `author.name`, plus `_some` / `_none` for O2M/M2M
-- Dynamic variables: `$CURRENT_USER`, `$CURRENT_ROLE`, `$NOW` (needed for row-level permissions)
+- Logical: `_and`, `_or` (empty groups match everything, as in Directus); several keys in one object are ANDed.
+- Shorthand: `{ "status": "draft" }` is `{ "status": { "_eq": "draft" } }`.
+- Comparison: `_eq`, `_neq`, `_lt`, `_lte`, `_gt`, `_gte`, `_in`, `_nin`, `_between`, `_nbetween`, `_null`, `_nnull`, `_empty`, `_nempty`. `_eq: null` / `_neq: null` test for NULL; otherwise SQL semantics apply (`_neq` and `_nin` don't match NULL), as in Directus.
+- String: `_contains`, `_starts_with`, `_ends_with` (case-sensitive, like Directus on Postgres), their `_i…` case-insensitive and `_n…` negated forms.
+- Values are converted to the field's storage form before comparing (§8.6): `"10"` for an integer field is 10, `"2024-01-05"` for a timestamp field is `2024-01-05T00:00:00.000Z`, so comparisons are correct, not textual accidents. Query-string values `true`, `false` and `null` are read as such.
+- Dynamic variables: `$NOW`, `$NOW(-1 year)` (units: years, months, weeks, days, hours, minutes, seconds and their short forms). `$CURRENT_USER`, `$CURRENT_ROLE`, `$CURRENT_ROLES`, `$CURRENT_POLICIES` resolve to null / `[]` until users exist (M3).
+- Not supported: `_regex` (SQLite has no regex function), geometry operators (no geometry type). Relational filters (`author.name`, `_some`, `_none`) come with M4.
+- Errors follow Directus: unknown fields are `FORBIDDEN` ("… or it does not exist."), malformed filters `INVALID_QUERY`.
 
 ### 8.4 Query builder
 
-Pipeline: `parse params → validate against the schema snapshot → merge permission filters → build SQL AST → render SQL + binds`.
+Pipeline: `parse params (parseQueryString) → sanitize (sanitizeQuery: defaults, limits, dynamic variables) → compile against the collection (unknown fields, operators and value types are rejected here) → SQL + numbered binds`. M3 inserts the permission filter before compiling.
 
 - Identifiers: only names present in metadata, quoted as `"…"`.
 - Values: always bind parameters.
-- M2O relations in `fields`: `LEFT JOIN`.
-- O2M/M2M relations in `fields`: a second query with `WHERE fk IN (…)`, merged in the app (avoids row duplication).
-- Relation depth (default 3) and maximum `limit` (e.g. 1000) are capped to prevent heavy queries.
+- Writes: `INSERT … SELECT … FROM json_each(?1) RETURNING pk` for creates; `UPDATE`/`DELETE … WHERE pk IN (…) RETURNING pk`, where `…` is a key, a JSON list of keys, or the keys a query selects (with its sort, limit and offset, as in Directus).
+- M4: M2O relations in `fields` via `LEFT JOIN`; O2M/M2M via a second query with `WHERE fk IN (…)`, merged in the app (avoids row duplication). Relation depth (default 3) is capped.
 
----
+### 8.5 D1 constraints
+
+D1 is SQLite behind an API with its own limits ([D1 limits](https://developers.cloudflare.com/d1/platform/limits/); re-check them before relying on them), which shape the generated SQL:
+
+| Limit | Consequence |
+|---|---|
+| At most 100 bound parameters per statement | Parameters are numbered (`?1`, `?2`, …) and equal values share one. Lists (`_in`, keys, inserted rows) travel as one JSON array read with `json_each()`. A query needing more than 100 distinct values is refused with `INVALID_QUERY` |
+| `LIKE`/`GLOB` patterns of at most 50 bytes | String operators and search use `instr()` / `substr()`, which have no such limit and need no wildcard escaping. Bonus: `_contains` is case-sensitive, where SQLite's `LIKE` isn't |
+| Strings (bound values) of at most 2 MB | Inserted rows are split into JSON batches of at most 512 KB, still in one atomic batch |
+| No interactive transactions | Every write is a single `batch()`; `RETURNING` reports which rows changed, so missing items are detected without a separate read |
+
+SQLite's `lower()` (and `LIKE`) fold ASCII letters only, so case-insensitive operators treat `É` and `é` as different.
+
+### 8.6 Values and payloads
+
+`packages/schema/src/values.ts` checks each payload value against its field type and stores it in one canonical form, so filters compare like with like:
+
+| Type | Accepted | Stored |
+|---|---|---|
+| string, text, hash | strings (numbers and booleans as text) | TEXT |
+| uuid | any 8-4-4-4-12 hex string | lowercase |
+| integer, bigInteger | integers, integer strings, within ±(2^53 − 1): D1 returns JS numbers, so larger values couldn't be read back exactly | INTEGER |
+| float, decimal | numbers, numeric strings | REAL |
+| boolean | `true`/`false`, `1`/`0`, `"true"`/`"false"` | 0/1, returned as booleans |
+| json | any JSON; a string holding valid JSON is stored as that JSON (Directus behaves the same) | JSON text, returned parsed |
+| csv | array or comma-separated string | `a,b`, returned as an array |
+| timestamp | ISO 8601 date/time; no zone = UTC | `YYYY-MM-DDTHH:MM:SS.sssZ` |
+| dateTime | ISO 8601 date/time; a zone is converted to UTC | `YYYY-MM-DDTHH:MM:SS` |
+| date / time | `YYYY-MM-DD` (a time part is ignored) / `HH:MM[:SS]` | as shown |
+
+Payload processing (`apps/api/src/items/payload.ts`), following Directus' PayloadService:
+- Keys that aren't columns are ignored, as in Directus; alias fields (nested relational writes) come with M4.
+- Specials: `uuid` (and UUID primary keys, ADR-007) get a UUIDv7 on create; `date-created` / `date-updated` are set on create / update; `user-created` / `user-updated` are null until users exist; `hash` fields (type or special) are hashed with PBKDF2-SHA256, 100 000 iterations (the most Workers allow), in PHC format; `conceal` fields read as `**********`.
+- String fields with a `max_length` are checked (`VALUE_TOO_LONG`), since SQLite doesn't enforce lengths.
+- The primary key can't be changed by an update.
+- Constraint errors map to Directus codes: `RECORD_NOT_UNIQUE`, `NOT_NULL_VIOLATION` (with `collection` and `field`).
+- `meta.validation` rules arrive in M3, together with permission validation, which uses the same mechanism. `meta.required` is enforced by the admin app, not the API, in Directus too.
+
+### 8.7 Differences from Directus
+
+Deliberate, where Directus' behavior is a quirk or doesn't fit D1:
+- Every operator in `{ "field": { "_gt": 1, "_lt": 5 } }` applies; Directus applies only the first.
+- Updating or deleting an item that doesn't exist is `FORBIDDEN` for admins too (Directus answers 204 to admins).
+- `?fields=`, `filter` and `sort` on a write are checked before writing, so a bad query doesn't leave a write behind with a 204.
+- `_contains` and friends treat `%` and `_` literally.
+- Values are type-checked (`INVALID_PAYLOAD` / `INVALID_QUERY`) instead of surfacing database errors.
 
 ## 9. Relations
 
@@ -289,7 +344,7 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 |---|---|---|
 | **M0 – Scaffold** ✅ | Monorepo, Hono Worker, D1 binding, system table migrations, CI | `wrangler dev` runs and tests pass (contract: `serverPing`/`serverInfo`/`serverHealth`) |
 | **M1 – Schema** ✅ | Collections/fields API, DDL generator, schema snapshot | A `posts` collection can be created via the API |
-| **M2 – Items** | Dynamic CRUD + filter/sort/fields/pagination | CRUD on `posts` with nested `_and/_or` filters |
+| **M2 – Items** ✅ | Dynamic CRUD + filter/sort/fields/pagination | CRUD on `posts` with nested `_and/_or` filters |
 | **M3 – Auth & RBAC** | Login, JWT, roles, policies, permissions + row-level | An "editor" role only sees its own posts |
 | **M4 – Relations** | M2O, O2M, M2M + nested `fields` | `posts.author.name`, `posts.tags.*` |
 | **M5 – Files** | Upload/serve via R2 | A post can have a cover image |
@@ -332,7 +387,10 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | ADR-010 | Access control follows the Directus 11 policy model: nested roles, policies attached to roles or users, permissions belong to policies, additive across policies | ✅ Accepted |
 | ADR-011 | User tables are `STRICT`; unique/indexed flags are separate named indexes, so toggling them never rebuilds the table | ✅ Accepted |
 | ADR-012 | Schema snapshot cached in isolate memory and revalidated against `schema_version` in D1 on each request, not in KV: KV is eventually consistent (up to ~60 s), which would serve outdated schemas after a change, and a cold load is a single D1 batch anyway. Each schema change writes a new UUIDv7 `schema_version` with a compare-and-swap in the same batch, so concurrent changes can't overwrite each other | ✅ Accepted |
-| ADR-013 | Until users and auth exist (M3), admin access is the `ADMIN_TOKEN` secret, sent like a Directus static token (`Authorization: Bearer` or `?access_token=`). Without it, schema endpoints answer `FORBIDDEN` | ✅ Accepted (temporary) |
+| ADR-013 | Until users and auth exist (M3), admin access is the `ADMIN_TOKEN` secret, sent like a Directus static token (`Authorization: Bearer` or `?access_token=`). Without it, schema and items endpoints answer `FORBIDDEN` | ✅ Accepted (temporary) |
+| ADR-014 | Item SQL is generated within D1's limits (§8.5): numbered, shared bind parameters (at most 100), lists as one JSON parameter read with `json_each()`, and `instr()`/`substr()` instead of `LIKE`/`GLOB` | ✅ Accepted |
+| ADR-015 | Item values are type-checked and stored in one canonical form per type (§8.6): lowercase UUIDs, UTC ISO timestamps, booleans as 0/1, integers within ±(2^53 − 1). Filter values are converted the same way before comparing | ✅ Accepted |
+| ADR-016 | `QUERY_LIMIT_DEFAULT` = 100 (as in Directus) and `QUERY_LIMIT_MAX` = 1000 (Directus: unlimited), both Worker vars: every row is serialized within the Worker's CPU and memory limits. With a maximum, `limit=-1` returns that many, as in Directus | ✅ Accepted |
 
 ---
 
@@ -361,7 +419,7 @@ Goal: a client written as `createDirectus(url).with(rest()).with(authentication(
 ### 17.3 Compatibility testing
 
 - A **contract test** suite runs the real `@directus/sdk` 21.3.0 against the local Worker via `@cloudflare/vitest-plugin`.
-- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`, `readCollections`, `readCollection`, `readFields`, `readFieldsByCollection`, `readField`, `updateCollection`, `updateCollectionsBatch`, `updateField`, `updateFields`, `deleteField`, `deleteCollection`; M2 → `readItems`, `createItem`, `updateItem`, `deleteItem`; M3 → `login`, `refresh`, `readMe`; M5 → `uploadFiles`.
+- Each milestone adds tests for its endpoints: M0 → `serverPing`, `serverInfo`, `serverHealth`, error detection via `isDirectusError`; M1 → `createCollection`, `createField`, `readCollections`, `readCollection`, `readFields`, `readFieldsByCollection`, `readField`, `updateCollection`, `updateCollectionsBatch`, `updateField`, `updateFields`, `deleteField`, `deleteCollection`; M2 → `readItems`, `readItem`, `createItem`, `createItems`, `updateItem`, `updateItems`, `updateItemsBatch`, `deleteItem`, `deleteItems`, `readSingleton`, `updateSingleton`, `withSearch`; M3 → `login`, `refresh`, `readMe`; M5 → `uploadFiles`.
 - With a real Directus available, send the same requests to both and compare response snapshots (ignoring ids and timestamps). The reference server uses the `directus/directus:11.17.4` image (not v12, which limits collections on the Core tier).
 - `@directus/sdk` is MIT-licensed; the licensing limits apply only to the Directus server, not to using the SDK as a test client.
 
