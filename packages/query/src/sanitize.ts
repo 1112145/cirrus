@@ -9,11 +9,14 @@ import type { Filter, MetaKey, Query } from './types.ts';
 export type FilterVariables = {
   /** `$NOW`; one value per request. */
   now: Date;
-  /** `$CURRENT_USER`, `$CURRENT_ROLE`, … arrive with users in M3; until then they resolve to null / []. */
+  /** `$CURRENT_USER`, `$CURRENT_ROLE`, `$CURRENT_ROLES`, `$CURRENT_POLICIES`; null / [] without a user. */
   user?: string | null;
   role?: string | null;
-  roles?: string[];
-  policies?: string[];
+  roles?: readonly string[];
+  policies?: readonly string[];
+  /** Field values for `$CURRENT_USER.<field>` and `$CURRENT_ROLE.<field>`; missing fields resolve to null. */
+  userRecord?: Readonly<Record<string, unknown>> | null;
+  roleRecord?: Readonly<Record<string, unknown>> | null;
 };
 
 export type SanitizeOptions = {
@@ -152,6 +155,14 @@ function parseValue(v: unknown, vars: FilterVariables): unknown {
   if (v === 'true') return true;
   if (v === 'false') return false;
   if (v === 'null' || v === 'NULL') return null;
+  return resolveVariable(v, vars);
+}
+
+/** Field paths of `$CURRENT_USER.<field>` / `$CURRENT_ROLE.<field>` (relational paths arrive with M4). */
+const RECORD_VARIABLE = /^\$CURRENT_(USER|ROLE)\.(.+)$/;
+
+/** A dynamic variable's value; any other string is returned as is. */
+export function resolveVariable(v: string, vars: FilterVariables): unknown {
   if (v.startsWith('$NOW')) return parseNow(v, vars.now);
   switch (v) {
     case '$CURRENT_USER':
@@ -159,13 +170,43 @@ function parseValue(v: unknown, vars: FilterVariables): unknown {
     case '$CURRENT_ROLE':
       return vars.role ?? null;
     case '$CURRENT_ROLES':
-      return vars.roles ?? [];
+      return [...(vars.roles ?? [])];
     case '$CURRENT_POLICIES':
-      return vars.policies ?? [];
+      return [...(vars.policies ?? [])];
   }
-  // $CURRENT_USER.<field> / $CURRENT_ROLE.<field> read the user or role record (M3).
-  if (v.startsWith('$CURRENT_USER.') || v.startsWith('$CURRENT_ROLE.')) return null;
+  const m = RECORD_VARIABLE.exec(v);
+  if (m) {
+    const record = m[1] === 'USER' ? vars.userRecord : vars.roleRecord;
+    return record && Object.hasOwn(record, m[2]!) ? (record[m[2]!] ?? null) : null;
+  }
   return v;
+}
+
+/**
+ * Which record fields `$CURRENT_USER.<field>` and `$CURRENT_ROLE.<field>` refer to anywhere in a
+ * value (filters, presets), so the caller can load only what is needed.
+ */
+export function recordVariables(value: unknown, out = { user: new Set<string>(), role: new Set<string>() }) {
+  if (typeof value === 'string') {
+    const m = RECORD_VARIABLE.exec(value);
+    if (m) out[m[1] === 'USER' ? 'user' : 'role'].add(m[2]!);
+  } else if (Array.isArray(value)) {
+    for (const v of value) recordVariables(v, out);
+  } else if (isPlainObject(value)) {
+    for (const v of Object.values(value)) recordVariables(v, out);
+  }
+  return out;
+}
+
+/** Permission presets with their dynamic variables resolved (Directus parsePreset); other values stay as they are. */
+export function parsePresets(presets: Record<string, unknown>, vars: FilterVariables): Record<string, unknown> {
+  const walk = (v: unknown): unknown => {
+    if (typeof v === 'string') return resolveVariable(v, vars);
+    if (Array.isArray(v)) return v.map(walk);
+    if (isPlainObject(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(presets) as Record<string, unknown>;
 }
 
 /** `$NOW` or `$NOW(<adjustment>)`, e.g. `$NOW(-1 year)`. */

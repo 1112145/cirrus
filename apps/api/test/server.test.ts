@@ -40,10 +40,12 @@ describe('system tables', () => {
     'cirrus_collections',
     'cirrus_fields',
     'cirrus_files',
+    'cirrus_guard',
     'cirrus_permissions',
     'cirrus_policies',
     'cirrus_relations',
     'cirrus_roles',
+    'cirrus_sessions',
     'cirrus_settings',
     'cirrus_users',
   ];

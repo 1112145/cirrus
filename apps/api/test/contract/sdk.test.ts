@@ -3,8 +3,41 @@
  * Each milestone adds its new commands here (spec §17.3).
  */
 import {
+  authentication,
   createCollection,
   createDirectus,
+  createPermission,
+  createPermissions,
+  createPolicy,
+  createRole,
+  createUser,
+  createUsers,
+  deletePermission,
+  deletePolicy,
+  deleteRole,
+  deleteUser,
+  login,
+  logout,
+  readItemPermissions,
+  readMe,
+  readPermission,
+  readPermissions,
+  readPolicies,
+  readPolicy,
+  readPolicyGlobals,
+  readProviders,
+  readRole,
+  readRoles,
+  readRolesMe,
+  readUser,
+  readUserPermissions,
+  readUsers,
+  refresh,
+  updateMe,
+  updatePermission,
+  updatePolicy,
+  updateRole,
+  updateUser,
   createField,
   createItem,
   createItems,
@@ -37,7 +70,7 @@ import {
   withSearch,
 } from '@directus/sdk';
 import { describe, expect, it } from 'vitest';
-import { ADMIN_TOKEN, BASE, tableSql, workerFetch } from '../helpers.ts';
+import { ADMIN_TOKEN, ADMIN_ROLE, BASE, tableSql, workerFetch } from '../helpers.ts';
 
 const client = createDirectus(BASE, { globals: { fetch: workerFetch } }).with(rest());
 const admin = createDirectus(BASE, { globals: { fetch: workerFetch } }).with(staticToken(ADMIN_TOKEN)).with(rest());
@@ -306,5 +339,145 @@ describe('@directus/sdk contract — M2', () => {
     expect(await errorCode(admin.request(readItems('posts', { fields: ['nope'] })))).toBe('FORBIDDEN');
     expect(await errorCode(admin.request(readItems('posts', { filter: { views: { _gt: 'many' } } })))).toBe('INVALID_QUERY');
     expect(await errorCode(admin.request(createItem('posts', { status: 'x' })))).toBe('NOT_NULL_VIOLATION');
+  });
+});
+
+describe('@directus/sdk contract — M3', () => {
+  // Done when: an "editor" role only sees its own posts.
+  const PASSWORD = 'sdk editor password';
+  const ids: Record<string, string> = {};
+  let updateId = 0;
+  const userClient = () => createDirectus(BASE, { globals: { fetch: workerFetch } }).with(authentication('json', { autoRefresh: false })).with(rest());
+
+  it('createPolicy() / createPermissions() / createRole() / createUser()', async () => {
+    await admin.request(
+      createCollection({ collection: 'notes', schema: {}, fields: [{ field: 'text', type: 'string' }, { field: 'owner', type: 'uuid', meta: { special: ['user-created'] } }] }),
+    );
+    const policy = await admin.request(createPolicy({ name: 'Note taker', app_access: true }));
+    expect(policy).toMatchObject({ name: 'Note taker', icon: 'badge', app_access: true, admin_access: false, enforce_tfa: false, ip_access: null });
+    ids.policy = policy.id;
+
+    const own = { owner: { _eq: '$CURRENT_USER' } };
+    const permissions = await admin.request(
+      createPermissions([
+        { policy: policy.id, collection: 'notes', action: 'read', permissions: own, fields: ['*'] },
+        { policy: policy.id, collection: 'notes', action: 'create', fields: ['text'] },
+      ]),
+    );
+    expect(permissions.map((p) => p.action)).toEqual(['read', 'create']);
+    const update = await admin.request(createPermission({ policy: policy.id, collection: 'notes', action: 'update', permissions: own, fields: ['text'] }));
+    expect(update).toMatchObject({ collection: 'notes', action: 'update', permissions: own, fields: ['text'], validation: null, presets: null });
+    updateId = update.id;
+
+    const role = await admin.request(createRole({ name: 'Note takers', policies: [{ policy: policy.id }] } as never));
+    expect(role).toMatchObject({ name: 'Note takers', icon: 'supervised_user_circle', parent: null });
+    ids.role = role.id;
+
+    const user = await admin.request(createUser({ email: 'sdk-ann@example.com', password: PASSWORD, role: role.id, first_name: 'Ann' }));
+    expect(user).toMatchObject({ email: 'sdk-ann@example.com', first_name: 'Ann', role: role.id, status: 'active', password: '**********' });
+    ids.ann = user.id;
+    const [ben] = await admin.request(createUsers([{ email: 'sdk-ben@example.com', password: PASSWORD, role: role.id }]));
+    ids.ben = ben!.id;
+  });
+
+  it('login() / readMe() / refresh() / logout() with authentication()', async () => {
+    const ann = userClient();
+    const auth = await ann.login({ email: 'sdk-ann@example.com', password: PASSWORD });
+    expect(auth).toMatchObject({ access_token: expect.any(String), refresh_token: expect.any(String), expires: 900_000 });
+    expect(await ann.request(readMe({ fields: ['id', 'email', 'role'] }))).toEqual({ id: ids.ann, email: 'sdk-ann@example.com', role: ids.role });
+
+    const refreshed = await ann.refresh();
+    expect(refreshed.refresh_token).not.toBe(auth.refresh_token);
+    expect((await ann.request(readMe())).id).toBe(ids.ann);
+
+    await ann.logout();
+    expect(await ann.getToken()).toBeNull();
+    expect(await errorCode(client.request(refresh({ mode: 'json', refresh_token: refreshed.refresh_token! })))).toBe('INVALID_CREDENTIALS');
+  });
+
+  it('login() / refresh() / logout() commands', async () => {
+    const tokens = await client.request(login({ email: 'sdk-ben@example.com', password: PASSWORD }, { mode: 'json' }));
+    expect(tokens).toMatchObject({ access_token: expect.any(String), refresh_token: expect.any(String), expires: 900_000 });
+    const next = await client.request(refresh({ mode: 'json', refresh_token: tokens.refresh_token! }));
+    expect(next.access_token).toBeTruthy();
+    await client.request(logout({ mode: 'json', refresh_token: next.refresh_token! }));
+    expect(await errorCode(client.request(login({ email: 'sdk-ben@example.com', password: 'wrong' }, { mode: 'json' })))).toBe('INVALID_CREDENTIALS');
+  });
+
+  it('an editor only sees their own items', async () => {
+    const [ann, ben] = [userClient(), userClient()];
+    await ann.login({ email: 'sdk-ann@example.com', password: PASSWORD });
+    await ben.login({ email: 'sdk-ben@example.com', password: PASSWORD });
+
+    const note = (await ann.request(createItem('notes', { text: 'Ann 1' }))) as { id: string; owner: string };
+    expect(note.owner).toBe(ids.ann);
+    await ben.request(createItem('notes', { text: 'Ben 1' }));
+
+    expect(await ann.request(readItems('notes', { fields: ['text'] }))).toEqual([{ text: 'Ann 1' }]);
+    expect(await ben.request(readItems('notes', { fields: ['text'] }))).toEqual([{ text: 'Ben 1' }]);
+    expect(await errorCode(ben.request(readItem('notes', note.id)))).toBe('FORBIDDEN');
+    expect(await errorCode(ben.request(updateItem('notes', note.id, { text: 'Ben was here' })))).toBe('FORBIDDEN');
+    expect(await errorCode(ben.request(createItem('notes', { text: 'x', owner: ids.ann })))).toBe('FORBIDDEN');
+    expect(await ann.request(updateItem('notes', note.id, { text: 'Ann 1b' }, { fields: ['text'] }))).toEqual({ text: 'Ann 1b' });
+
+    expect(await ann.request(readItemPermissions('notes', note.id))).toEqual({ update: { access: true }, delete: { access: false }, share: { access: false } });
+    const mine = await ann.request(readUserPermissions());
+    expect((mine as Record<string, Record<string, { access: string }>>).notes!.read!.access).toBe('partial');
+    expect(await ann.request(readPolicyGlobals())).toEqual({ app_access: true, admin_access: false, enforce_tfa: false });
+    expect(await ann.request(readRolesMe({ fields: ['id', 'name'] }))).toEqual([{ id: ids.role, name: 'Note takers' }]);
+    expect(await errorCode(ann.request(updateMe({ first_name: 'Annie' })))).toBe('FORBIDDEN');
+  });
+
+  it('readUsers() / readUser() / updateUser() / updateMe()', async () => {
+    const users = await admin.request(readUsers({ fields: ['email'], filter: { email: { _starts_with: 'sdk-' } }, sort: ['email'] }));
+    expect(users).toEqual([{ email: 'sdk-ann@example.com' }, { email: 'sdk-ben@example.com' }]);
+    expect(await admin.request(readUser(ids.ann!, { fields: ['first_name'] }))).toEqual({ first_name: 'Ann' });
+    expect(await admin.request(updateUser(ids.ann!, { title: 'Writer' }, { fields: ['title'] }))).toEqual({ title: 'Writer' });
+
+    const ann = createDirectus(BASE, { globals: { fetch: workerFetch } }).with(staticToken('sdk-ann-static-token-0123456789')).with(rest());
+    await admin.request(updateUser(ids.ann!, { token: 'sdk-ann-static-token-0123456789' }));
+    expect((await ann.request(readMe({ fields: ['id'] }))).id).toBe(ids.ann);
+    await admin.request(createPermission({ policy: ids.policy!, collection: 'directus_users', action: 'update', permissions: { id: { _eq: '$CURRENT_USER' } }, fields: ['first_name'] }));
+    expect(await ann.request(updateMe({ first_name: 'Annie' }, { fields: ['first_name'] }))).toEqual({ first_name: 'Annie' });
+  });
+
+  it('readRoles() / readRole() / updateRole() / readPolicies() / readPolicy() / updatePolicy()', async () => {
+    const roles = await admin.request(readRoles({ fields: ['name'], sort: ['name'] }));
+    expect(roles).toEqual([{ name: 'Administrator' }, { name: 'Note takers' }]);
+    expect(await admin.request(readRole(ADMIN_ROLE, { fields: ['name', 'icon'] }))).toEqual({ name: 'Administrator', icon: 'verified' });
+    expect(await admin.request(updateRole(ids.role!, { description: 'Takes notes' }, { fields: ['description'] }))).toEqual({ description: 'Takes notes' });
+
+    const policies = await admin.request(readPolicies({ fields: ['name'], filter: { admin_access: { _eq: true } } }));
+    expect(policies).toEqual([{ name: 'Administrator' }]);
+    expect(await admin.request(readPolicy(ids.policy!, { fields: ['name'] }))).toEqual({ name: 'Note taker' });
+    expect(await admin.request(updatePolicy(ids.policy!, { enforce_tfa: false, icon: 'edit' }, { fields: ['icon'] }))).toEqual({ icon: 'edit' });
+  });
+
+  it('readPermissions() / readPermission() / updatePermission() / deletePermission()', async () => {
+    const permissions = await admin.request(readPermissions({ fields: ['action'], filter: { collection: { _eq: 'notes' } }, sort: ['id'] }));
+    expect(permissions).toEqual([{ action: 'read' }, { action: 'create' }, { action: 'update' }]);
+    expect(await admin.request(readPermission(updateId, { fields: ['action'] }))).toEqual({ action: 'update' });
+    expect(await admin.request(updatePermission(updateId, { fields: ['*'] }, { fields: ['fields'] }))).toEqual({ fields: ['*'] });
+    await admin.request(deletePermission(updateId));
+    expect(await errorCode(admin.request(readPermission(updateId)))).toBe('FORBIDDEN');
+  });
+
+  it('deleteUser() / deleteRole() / deletePolicy()', async () => {
+    await admin.request(deleteUser(ids.ben!));
+    expect(await errorCode(admin.request(readUser(ids.ben!)))).toBe('FORBIDDEN');
+    await admin.request(deleteRole(ids.role!));
+    expect(await admin.request(readUser(ids.ann!, { fields: ['role'] }))).toEqual({ role: null });
+    await admin.request(deletePolicy(ids.policy!));
+    expect(await admin.request(readPermissions({ filter: { policy: { _eq: ids.policy! } } }))).toEqual([]);
+  });
+
+  it('readProviders()', async () => {
+    expect(await client.request(readProviders())).toEqual([]);
+  });
+
+  it('auth errors use Directus codes', async () => {
+    const bad = createDirectus(BASE, { globals: { fetch: workerFetch } }).with(staticToken('not-a-token')).with(rest());
+    expect(await errorCode(bad.request(readMe()))).toBe('INVALID_CREDENTIALS');
+    expect(await errorCode(client.request(readMe()))).toBe('INVALID_CREDENTIALS');
   });
 });

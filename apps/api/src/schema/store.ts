@@ -1,5 +1,6 @@
 import type { ColumnDef, FieldDef, FieldType, TableDef } from '@cirrus/schema';
-import { forbidden } from '@cirrus/shared';
+import { forbidden, uuidv7 } from '@cirrus/shared';
+import { ACCESS_SQL, type AccessSnapshot, accessFromRows } from '../access/snapshot.ts';
 import {
   COLLECTION_META,
   COLUMN_INPUT,
@@ -11,7 +12,20 @@ import {
   metaToColumns,
 } from './meta.ts';
 
-export type FieldRecord = FieldDef & { id: number; collection: string; meta: FieldMeta };
+export type FieldRecord = FieldDef & {
+  id: number;
+  collection: string;
+  meta: FieldMeta;
+  /** An O2M alias whose nested writes are supported: items of `collection` point back through `field`. System collections only until M4. */
+  o2m?: O2M;
+};
+
+export type O2M = {
+  collection: string;
+  field: string;
+  /** What happens to related items no longer in the list (Directus one_deselect_action). */
+  deselect: 'nullify' | 'delete';
+};
 export type NewField = Omit<FieldRecord, 'id'>;
 
 export type CollectionRecord = {
@@ -24,9 +38,11 @@ export type CollectionRecord = {
 
 /** All schema metadata, loaded at once (spec §4). */
 export type Schema = {
-  /** Raw cirrus_settings.schema_version; replaced with a new UUIDv7 on every schema change. */
+  /** Raw cirrus_settings.schema_version; replaced with a new UUIDv7 on every schema or access change. */
   version: string;
+  /** User collections; system collections (directus_users, …) are defined in code (system/collections.ts). */
   collections: Map<string, CollectionRecord>;
+  access: AccessSnapshot;
 };
 
 type Row = Record<string, unknown>;
@@ -48,6 +64,10 @@ export async function getSchema(db: D1Database): Promise<Schema> {
   return cached;
 }
 
+/** Replace schema_version so every isolate reloads the snapshot; for writes to roles, policies, access and permissions. */
+export const bumpSchemaVersion = (db: D1Database) =>
+  db.prepare("UPDATE cirrus_settings SET value = ?1 WHERE key = 'schema_version'").bind(JSON.stringify(uuidv7()));
+
 /** Drop the cached snapshot after a schema change, so the next read is a single batch. */
 export const invalidateSchema = () => {
   cached = null;
@@ -57,10 +77,11 @@ export const readSchemaVersion = async (db: D1Database) =>
   (await db.prepare(VERSION_SQL).first<{ value: string }>())?.value ?? null;
 
 async function loadSchema(db: D1Database): Promise<Schema> {
-  const [version, collections, fields] = await db.batch<Row>([
+  const [version, collections, fields, ...access] = await db.batch<Row>([
     db.prepare(VERSION_SQL),
     db.prepare('SELECT * FROM cirrus_collections ORDER BY collection'),
     db.prepare('SELECT * FROM cirrus_fields ORDER BY collection, sort IS NULL, sort, id'),
+    ...ACCESS_SQL.map((sql) => db.prepare(sql)),
   ]);
 
   const map = new Map<string, CollectionRecord>();
@@ -70,7 +91,12 @@ async function loadSchema(db: D1Database): Promise<Schema> {
   }
   for (const row of fields!.results) map.get(row.collection as string)?.fields.push(fieldFromRow(row));
 
-  return { version: version!.results[0]!.value as string, collections: map };
+  const [roles, policies, accessRows, permissions] = access.map((r) => r.results);
+  return {
+    version: version!.results[0]!.value as string,
+    collections: map,
+    access: accessFromRows(roles!, policies!, accessRows!, permissions!),
+  };
 }
 
 function fieldFromRow(row: Row): FieldRecord {

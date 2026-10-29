@@ -2,8 +2,9 @@ import type { FieldType } from '@cirrus/schema';
 
 /** What the query compiler needs to know about a collection, taken from the schema snapshot. */
 export type QueryCollection = {
-  /** Collection name, which is also the table name. */
   collection: string;
+  /** Table name when it isn't the collection name (system collections: directus_users → cirrus_users). */
+  table?: string;
   primary: string;
   /** Default sort (Directus meta.sort_field); null sorts by the primary key. */
   sortField: string | null;
@@ -16,6 +17,11 @@ export type QueryField = {
   type: FieldType;
   /** Directus meta.searchable: included in `search`. */
   searchable: boolean;
+  /**
+   * Hashed or concealed values (passwords, tokens): requests may only test them for null, so their
+   * values can't be recovered by filtering (`_starts_with` …) or sorting on them.
+   */
+  concealed?: boolean;
 };
 
 /** A Directus filter; values have been through `parseFilter`, so dynamic variables are resolved. */

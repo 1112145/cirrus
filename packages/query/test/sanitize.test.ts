@@ -107,7 +107,7 @@ describe('filters', () => {
     invalid(() => sanitizeQuery({ filter }, opts), 'The filter is nested too deeply');
   });
 
-  it('resolves user variables to nothing until users exist (M3)', () => {
+  it('resolves user variables to nothing without a user', () => {
     const q = fromQs(`filter=${encodeURIComponent('{"owner":{"_eq":"$CURRENT_USER"},"role":{"_in":"$CURRENT_ROLES"},"x":"$CURRENT_USER.email"}')}`);
     expect(plain(q.filter)).toEqual({ owner: { _eq: null }, role: { _in: [] }, x: null });
   });

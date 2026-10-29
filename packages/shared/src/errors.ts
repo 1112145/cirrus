@@ -9,8 +9,10 @@ export const ERROR_STATUS = {
   INVALID_TOKEN: 401,
   TOKEN_EXPIRED: 401,
   INVALID_OTP: 401,
+  USER_SUSPENDED: 401,
   INVALID_PAYLOAD: 400,
   INVALID_QUERY: 400,
+  FAILED_VALIDATION: 400,
   INVALID_FOREIGN_KEY: 400,
   CONTAINS_NULL_VALUES: 400,
   VALUE_OUT_OF_RANGE: 400,
@@ -54,6 +56,22 @@ export class CirrusError extends Error {
 }
 
 export const isCirrusError = (e: unknown): e is CirrusError => e instanceof CirrusError;
+
+/** Several errors in one response, as Directus reports failed validations: { errors: [a, b, …] }. */
+export class CirrusErrors extends CirrusError {
+  readonly list: readonly CirrusError[];
+
+  constructor(list: readonly CirrusError[]) {
+    const first = list[0];
+    if (!first) throw new Error('CirrusErrors needs at least one error');
+    super(first.code, first.message, first.extensions);
+    this.list = list;
+  }
+
+  override toBody(): DirectusErrorBody {
+    return { errors: this.list.flatMap((e) => e.toBody().errors) };
+  }
+}
 
 /** Directus InvalidPayloadError: "Invalid payload. <reason>." with extensions.reason. */
 export const invalidPayload = (reason: string) =>
