@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { FILES } from '../lib/schema.ts';
+import { USERS } from '../lib/system.ts';
+import { can } from '../stores/schema.ts';
 import { displayName, logout, session } from '../stores/session.ts';
 import Icon, { type ICONS } from './Icon.vue';
 
@@ -9,11 +12,10 @@ const route = useRoute();
 const router = useRouter();
 
 const modules = computed(() => {
-  const list: Array<{ path: string; label: string; icon: keyof typeof ICONS }> = [
-    { path: '/content', label: 'Content', icon: 'box' },
-    { path: '/files', label: 'File library', icon: 'image' },
-  ];
-  if (session.admin) list.push({ path: '/settings/data-model', label: 'Data model', icon: 'database' });
+  const list: Array<{ path: string; label: string; icon: keyof typeof ICONS }> = [{ path: '/content', label: 'Content', icon: 'box' }];
+  if (can(USERS, 'read')) list.push({ path: '/users', label: 'Users', icon: 'users' });
+  if (can(FILES, 'read')) list.push({ path: '/files', label: 'File library', icon: 'image' });
+  if (session.admin) list.push({ path: '/settings', label: 'Settings', icon: 'sliders' });
   return list;
 });
 
@@ -50,7 +52,9 @@ async function signOut() {
         <Icon :name="m.icon" :size="22" />
       </RouterLink>
       <span class="spacer" />
-      <div v-if="session.user" class="avatar" :title="displayName(session.user)">{{ initials }}</div>
+      <RouterLink v-if="session.user" :to="`/users/${session.user.id}`" class="avatar" :title="`${displayName(session.user)}: your profile`" aria-label="Your profile">
+        {{ initials }}
+      </RouterLink>
       <button type="button" class="module" title="Log out" aria-label="Log out" @click="signOut"><Icon name="logout" :size="22" /></button>
     </nav>
     <main class="module-view">

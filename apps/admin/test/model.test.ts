@@ -83,6 +83,15 @@ describe('what forms and lists read', () => {
     expect(formPaths('posts')).toContain('cover.filename_download');
   });
 
+  it('reads users through their own fields (a relation to directus_users)', () => {
+    schema.fields.push(f('posts', 'owner', 'uuid'));
+    schema.relations.push(r('posts', 'owner', 'directus_users'));
+    schema.permissions.directus_users = { read: { access: 'partial', fields: ['*'] } };
+    expect(templateFor('directus_users')).toBe('{{ first_name }} {{ last_name }}');
+    expect(formPaths('posts')).toContain('owner.email');
+    expect(formPaths('posts')).not.toContain('owner.undefined');
+  });
+
   it('shows visible fields, without the automatic ones when creating', () => {
     expect(formFields('posts', true).map((x) => x.field)).toEqual(['title', 'body', 'data', 'author', 'cover', 'tags', 'seo']);
     expect(formFields('posts', false).map((x) => x.field)).toEqual(['title', 'body', 'data', 'date_created', 'author', 'cover', 'tags', 'seo']);

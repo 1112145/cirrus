@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { deleteFile, readFile, readFolders, updateFile } from '@directus/sdk';
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
+import { computed, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { assetUrl, request } from '../api.ts';
 import FieldInput from '../components/FieldInput.vue';
+import { useUnsavedGuard } from '../composables/unsaved.ts';
 import Icon from '../components/Icon.vue';
 import PageLayout from '../components/PageLayout.vue';
 import { fileSize } from '../lib/display.ts';
@@ -146,15 +147,7 @@ async function remove() {
 
 // Unsaved changes ----------------------------------------------------------------------------------
 
-const leave = async () => !dirty.value || (await confirm('Discard your unsaved changes?', { action: 'Discard', danger: true }));
-onBeforeRouteLeave(leave);
-onBeforeRouteUpdate(leave);
-
-function beforeUnload(e: BeforeUnloadEvent) {
-  if (dirty.value) e.preventDefault();
-}
-onMounted(() => window.addEventListener('beforeunload', beforeUnload));
-onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload));
+useUnsavedGuard(dirty, save);
 
 // Display ----------------------------------------------------------------------------------------
 

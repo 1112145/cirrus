@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import Icon from '../components/Icon.vue';
 import Modal from '../components/Modal.vue';
 import PageLayout from '../components/PageLayout.vue';
+import SettingsNav from '../components/SettingsNav.vue';
 import { collectionPlan, OPTIONAL_FIELDS, type OptionalField, PRIMARY_KEYS, type PrimaryKeyKind } from '../lib/builder.ts';
 import { errorMessage } from '../lib/errors.ts';
 import { isFolder, nameError, titleOf } from '../lib/schema.ts';
@@ -79,6 +80,7 @@ async function create() {
 
 <template>
   <PageLayout title="Data model" subtitle="Collections, their fields and relations">
+    <template #nav><SettingsNav /></template>
     <template #actions>
       <button type="button" class="btn primary" @click="start"><Icon name="plus" :size="18" />Create collection</button>
     </template>

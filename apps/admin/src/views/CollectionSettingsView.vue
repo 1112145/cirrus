@@ -6,6 +6,7 @@ import { request } from '../api.ts';
 import FieldDialog from '../components/FieldDialog.vue';
 import Icon from '../components/Icon.vue';
 import PageLayout from '../components/PageLayout.vue';
+import SettingsNav from '../components/SettingsNav.vue';
 import { reorder } from '../lib/builder.ts';
 import { templateFields, templateOf } from '../lib/display.ts';
 import { errorMessage } from '../lib/errors.ts';
@@ -154,6 +155,7 @@ async function removeCollection() {
 
 <template>
   <PageLayout :subtitle="collection ? name : undefined">
+    <template #nav><SettingsNav /></template>
     <template #back>
       <RouterLink to="/settings/data-model" class="icon-btn" aria-label="Back to the data model"><Icon name="back" /></RouterLink>
     </template>

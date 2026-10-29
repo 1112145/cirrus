@@ -1,4 +1,4 @@
-import { readCollections, readFields, readRelations, readUserPermissions } from '@directus/sdk';
+import { readCollections, readFields, readItemPermissions, readRelations, readUserPermissions } from '@directus/sdk';
 import { reactive } from 'vue';
 import { request } from '../api.ts';
 import { type Collection, type Field, FILES, isFolder, isPrimaryKey, type Relation, sortFields } from '../lib/schema.ts';
@@ -46,6 +46,25 @@ export function can(collection: string, action: Action): boolean {
   return access !== undefined && access !== 'none';
 }
 
+export type ItemAccess = { update: boolean; delete: boolean };
+
+/**
+ * Whether the user may update and delete one item (or a singleton, with a null key): a policy may
+ * allow some items only. Directus' /permissions/me/:collection/:key; admins may do everything.
+ */
+export async function itemAccess(collection: string, key: string | number | null): Promise<ItemAccess> {
+  if (session.admin) return { update: true, delete: true };
+  try {
+    const r = await request<{ update?: { access?: boolean }; delete?: { access?: boolean } }>(
+      key === null ? readItemPermissions(collection) : readItemPermissions(collection, String(key)),
+    );
+    return { update: r.update?.access === true, delete: r.delete?.access === true };
+  } catch {
+    // Unknown: let the API decide when saving.
+    return { update: can(collection, 'update'), delete: can(collection, 'delete') };
+  }
+}
+
 /** Collections with items the user may read, for navigation: not folders, not hidden. */
 export const contentCollections = () =>
   schema.collections
@@ -69,8 +88,9 @@ const meta = (sort: number, extra: Partial<Field['meta'] & object> = {}): Field[
   ...extra,
 });
 
-const fileField = (field: string, type: Field['type'], sort: number, extra: Partial<Field['meta'] & object> = {}, pk = false): Field => ({
-  collection: FILES,
+/** A system collection's field as the app shows it (the API doesn't list system collections' fields). */
+export const systemField = (collection: string, field: string, type: Field['type'], sort: number, extra: Partial<Field['meta'] & object> = {}, pk = false): Field => ({
+  collection,
   field,
   type,
   meta: meta(sort, extra),
@@ -81,17 +101,17 @@ const fileField = (field: string, type: Field['type'], sort: number, extra: Part
 
 /** directus_files as the app shows it (the API doesn't list system collections' fields). */
 const FILE_FIELDS: Field[] = [
-  fileField('id', 'uuid', 1, { hidden: true, readonly: true, special: ['uuid'] }, true),
-  fileField('title', 'string', 2),
-  fileField('description', 'text', 3, { interface: 'input-multiline' }),
-  fileField('tags', 'json', 4, { interface: 'tags', special: ['cast-json'] }),
-  fileField('location', 'text', 5, { width: 'half' }),
-  fileField('filename_download', 'string', 6, { width: 'half' }),
-  fileField('type', 'string', 7, { readonly: true, width: 'half' }),
-  fileField('filesize', 'bigInteger', 8, { readonly: true, width: 'half' }),
-  fileField('width', 'integer', 9, { readonly: true, width: 'half' }),
-  fileField('height', 'integer', 10, { readonly: true, width: 'half' }),
-  fileField('folder', 'uuid', 11, { hidden: true }),
-  fileField('uploaded_on', 'timestamp', 12, { readonly: true, width: 'half' }),
-  fileField('modified_on', 'timestamp', 13, { readonly: true, width: 'half' }),
+  systemField(FILES, 'id', 'uuid', 1, { hidden: true, readonly: true, special: ['uuid'] }, true),
+  systemField(FILES, 'title', 'string', 2),
+  systemField(FILES, 'description', 'text', 3, { interface: 'input-multiline' }),
+  systemField(FILES, 'tags', 'json', 4, { interface: 'tags', special: ['cast-json'] }),
+  systemField(FILES, 'location', 'text', 5, { width: 'half' }),
+  systemField(FILES, 'filename_download', 'string', 6, { width: 'half' }),
+  systemField(FILES, 'type', 'string', 7, { readonly: true, width: 'half' }),
+  systemField(FILES, 'filesize', 'bigInteger', 8, { readonly: true, width: 'half' }),
+  systemField(FILES, 'width', 'integer', 9, { readonly: true, width: 'half' }),
+  systemField(FILES, 'height', 'integer', 10, { readonly: true, width: 'half' }),
+  systemField(FILES, 'folder', 'uuid', 11, { hidden: true }),
+  systemField(FILES, 'uploaded_on', 'timestamp', 12, { readonly: true, width: 'half' }),
+  systemField(FILES, 'modified_on', 'timestamp', 13, { readonly: true, width: 'half' }),
 ];

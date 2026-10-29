@@ -3,15 +3,15 @@
 A Directus-style headless CMS that runs entirely on Cloudflare (Workers + Hono, D1, R2, KV, Durable Objects, Queues).
 Its REST API is compatible with `@directus/sdk` 21.3.0 (Directus 11.17.4). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design.
 
-> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging), M3 (auth: login, roles, policies, permissions down to rows and fields), M4 (relations: M2O, O2M, M2M, nested fields, relational filters, `deep`, nested writes, `on_delete`) M5 (files: uploads streamed into R2, folders, assets with Range, cache headers and image transformations) and M6 (the admin app: data model, content and file library in the browser) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
+> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging), M3 (auth: login, roles, policies, permissions down to rows and fields), M4 (relations: M2O, O2M, M2M, nested fields, relational filters, `deep`, nested writes, `on_delete`), M5 (files: uploads streamed into R2, folders, assets with Range, cache headers and image transformations), M6 (the admin app: data model, content and file library in the browser) and M7 (users, roles, policies and permissions in the admin) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
 
 ## Layout
 
 ```
 apps/admin/          Vue 3 admin app, served by the Worker under /admin
-  src/views/         screens: login, content (lists, item forms), file library, data model
+  src/views/         screens: login, content (lists, item forms), file library, users, settings (data model, roles, policies)
   src/components/    the form inputs (relations, files, tags, …), pickers, dialogs, layout
-  src/lib/           pure logic: Directus schema shapes, value conversions, display templates, data model plans
+  src/lib/           pure logic: Directus schema shapes, value conversions, display templates, data model plans, access control
   src/stores/        session, data model and permissions, notifications
   test/              unit tests (Vitest); e2e/ end-to-end tests (Playwright against wrangler dev)
 apps/api/            Hono Worker
@@ -63,8 +63,9 @@ curl -X POST http://localhost:8787/auth/login -H 'Content-Type: application/json
 ### Admin app
 
 http://localhost:8787/admin manages everything below without curl: collections and their fields (text, numbers,
-dropdowns, dates, JSON, images and files, many to one, one to many, many to many), their items, and the file
-library. Users with app access see the collections their permissions allow; the data model is for admins.
+dropdowns, dates, JSON, images and files, many to one, one to many, many to many), their items, the file library,
+and who may do what: users (with passwords and static tokens), roles, and policies with their permissions, down to
+items and fields (Settings). Users with app access see what their permissions allow; settings are for admins.
 
 ```bash
 pnpm dev:admin             # Vite with hot reload on http://localhost:5173/admin/, using the API of `pnpm dev`
@@ -184,4 +185,5 @@ in R2). Remove the binding from `wrangler.jsonc` to turn them off.
 | M4 – Relations | ✅ |
 | M5 – Files | ✅ |
 | M6 – Admin UI MVP | ✅ |
-| M7+ – Extensions | |
+| M7 – Users & access in the admin | ✅ |
+| M8+ – Extensions | |

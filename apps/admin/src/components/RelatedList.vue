@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue';
 import { keyOf } from '../lib/payload.ts';
 import type { RelationInfo } from '../lib/schema.ts';
+import { itemRoute } from '../lib/system.ts';
 import { can, primaryKeyOf } from '../stores/schema.ts';
 import Icon from './Icon.vue';
 import ItemLabel from './ItemLabel.vue';
@@ -25,6 +26,12 @@ const relatedPk = computed(() => primaryKeyOf(props.relation.related));
 /** The related item a row shows. */
 const relatedOf = (row: Row): unknown => (props.relation.kind === 'm2m' ? row[props.relation.junctionField] : row);
 
+/** The page of a row's related item, when it has one. */
+function linkOf(row: Row): string | null {
+  const key = keyOf(relatedOf(row), relatedPk.value);
+  return key === null ? null : itemRoute(props.relation.related, key);
+}
+
 const relatedKeys = computed(() => rows.value.map((r) => keyOf(relatedOf(r), relatedPk.value)).filter((k): k is string | number => k !== null));
 
 function remove(i: number) {
@@ -47,12 +54,7 @@ function add(items: Row[]) {
       <li v-for="(row, i) in rows" :key="i" class="row">
         <ItemLabel :collection="relation.related" :item="relatedOf(row)" />
         <span class="spacer" />
-        <RouterLink
-          v-if="keyOf(relatedOf(row), relatedPk) !== null && relation.related !== 'directus_files'"
-          class="icon-btn"
-          :to="`/content/${relation.related}/${keyOf(relatedOf(row), relatedPk)}`"
-          aria-label="Open"
-        >
+        <RouterLink v-if="linkOf(row)" class="icon-btn" :to="linkOf(row)!" aria-label="Open">
           <Icon name="external" :size="16" />
         </RouterLink>
         <button v-if="!disabled" type="button" class="icon-btn danger" aria-label="Remove" @click="remove(i)"><Icon name="x" :size="16" /></button>
