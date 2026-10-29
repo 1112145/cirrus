@@ -54,3 +54,10 @@ export class CirrusError extends Error {
 }
 
 export const isCirrusError = (e: unknown): e is CirrusError => e instanceof CirrusError;
+
+/** Directus InvalidPayloadError: "Invalid payload. <reason>." with extensions.reason. */
+export const invalidPayload = (reason: string) =>
+  new CirrusError('INVALID_PAYLOAD', `Invalid payload. ${reason}.`, { reason });
+
+/** Directus ForbiddenError. Also used for things that don't exist, so their existence isn't leaked. */
+export const forbidden = () => new CirrusError('FORBIDDEN', "You don't have permission to access this.");

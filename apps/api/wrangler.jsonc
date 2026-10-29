@@ -22,8 +22,10 @@
     }
   ]
 
+  // Secrets (`wrangler secret put <name>`; locally in .dev.vars):
+  // ADMIN_TOKEN: static admin token for the schema endpoints until auth lands (M3)
+
   // Added in later milestones:
-  // M1: kv_namespaces SCHEMA_CACHE (schema snapshot)
   // M5: r2_buckets STORAGE
   // M7: queues FLOWS, durable_objects REALTIME
 }
