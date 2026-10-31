@@ -1,6 +1,7 @@
 import { CirrusError, isCirrusError, routeNotFound } from '@cirrus/shared';
 import type { ErrorHandler, NotFoundHandler } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
+import { RequestsExceededError } from '../auth/limit.ts';
 import type { AppEnv } from '../env.ts';
 
 /** Serialize every error in Directus format: { errors: [{ message, extensions: { code } }] } */
@@ -10,6 +11,7 @@ export const onError: ErrorHandler<AppEnv> = (err, c) => {
     : new CirrusError('INTERNAL_SERVER_ERROR', 'An unexpected error occurred.');
 
   if (!isCirrusError(err)) console.error(err);
+  if (err instanceof RequestsExceededError) c.header('Retry-After', String(err.retryAfter));
 
   return c.json(e.toBody(), e.status as ContentfulStatusCode);
 };

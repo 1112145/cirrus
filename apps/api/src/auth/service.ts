@@ -3,6 +3,7 @@ import type { Bindings } from '../env.ts';
 import { JWT_ISSUER } from '../middleware/auth.ts';
 import { accountabilityFor } from '../request.ts';
 import { getSchema } from '../schema/store.ts';
+import { reserveLoginAttempt } from './limit.ts';
 
 /**
  * Email/password login with short-lived access tokens (HS256 JWTs) and refresh tokens kept in
@@ -41,6 +42,8 @@ type UserRow = { id: string; password: string | null; role: string | null; statu
  */
 export async function login(env: Bindings, email: string, password: string, client: ClientInfo, opts: { session?: boolean } = {}): Promise<Tokens> {
   const key = secret(env);
+  // Before the hash check, so refused guesses cost nothing (ADR-029).
+  const attempt = await reserveLoginAttempt(env, email, client.ip);
   // The email column is COLLATE NOCASE: emails match ignoring case.
   const user = await env.DB.prepare('SELECT id, password, role, status FROM cirrus_users WHERE email = ?1').bind(email).first<UserRow>();
   const verified = await verifySecret(password, user?.password ?? DUMMY_HASH);
@@ -63,6 +66,7 @@ export async function login(env: Bindings, email: string, password: string, clie
     env.DB.prepare('UPDATE cirrus_users SET last_access = ?2 WHERE id = ?1').bind(user.id, now.toISOString()),
     // Opportunistic cleanup of the user's expired sessions.
     env.DB.prepare('DELETE FROM cirrus_sessions WHERE user = ?1 AND expires <= ?2').bind(user.id, now.toISOString()),
+    ...attempt.release(env.DB),
   ]);
   if (opts.session) return { accessToken: await sessionToken(env, key, user.id, user.role, refreshToken), refreshToken, expires: sessionTtl(env) };
   return { accessToken: await accessToken(env, key, user.id, user.role), refreshToken, expires: accessTokenTtl(env) };

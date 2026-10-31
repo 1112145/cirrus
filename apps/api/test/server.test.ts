@@ -53,6 +53,7 @@ describe('system tables', () => {
     'cirrus_files',
     'cirrus_folders',
     'cirrus_guard',
+    'cirrus_login_attempts',
     'cirrus_permissions',
     'cirrus_policies',
     'cirrus_relations',

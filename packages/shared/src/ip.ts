@@ -86,3 +86,15 @@ export function ipInNetworks(ip: string, networks: readonly string[]): boolean {
     return a.value >> shift === n.value >> shift;
   });
 }
+
+/**
+ * The address to count a client by: IPv4 addresses as they are (IPv4-mapped ones included), IPv6
+ * ones as their /64, which a single client usually holds whole. null for anything else.
+ */
+export function clientNetwork(ip: string): string | null {
+  const a = parseAddress(ip);
+  if (!a) return null;
+  if (!a.v6) return [24n, 16n, 8n, 0n].map((s) => String((a.value >> s) & 0xffn)).join('.');
+  const groups = [112n, 96n, 80n, 64n].map((s) => ((a.value >> s) & 0xffffn).toString(16));
+  return `${groups.join(':')}::/64`;
+}
