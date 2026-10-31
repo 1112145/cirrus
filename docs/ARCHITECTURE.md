@@ -161,7 +161,7 @@ Every schema change is one `db.batch()`: DDL + metadata writes + a compare-and-s
 
 `packages/schema` takes `(current metadata, desired metadata)` and returns a list of DDL steps plus a `requiresRebuild` flag (`planTableChange`). It is pure logic; its tests execute the generated SQL on Node's built-in SQLite, without D1.
 
-Later: `GET /schema/snapshot` + `POST /schema/apply` to version the schema in git (like Directus schema snapshots).
+Schema snapshots (§7.5) use it to apply a whole schema at once.
 
 ### 7.4 D1 limits to keep in mind
 
@@ -169,6 +169,15 @@ Later: `GET /schema/snapshot` + `POST /schema/apply` to version the schema in gi
 - Writes are serialized per database: avoid long transactions and run large rebuilds at quiet times.
 - No interactive transactions through the binding; only `batch()` is atomic.
 - ⚠️ Re-check the current limits in the Cloudflare docs before relying on them.
+
+### 7.5 Schema snapshots
+
+Implemented in `apps/api/src/schema/snapshot.ts` and `apps/api/src/routes/schema.ts`, with deep-diff's format in `packages/shared/src/diff.ts`. The schema can be versioned in git and moved between projects as with Directus (`schemaSnapshot()`, `schemaDiff()`, `schemaApply()` in the SDK). Admin only.
+
+- `GET /schema/snapshot`: `{ version: 1, directus: "11.17.4", vendor: "sqlite", collections, fields, systemFields: [], relations }`, the objects of `/collections`, `/fields` and `/relations` without their ids, keys sorted, collections by name. `?export=json` downloads it as a file (Directus also exports YAML; Cirrus doesn't).
+- `POST /schema/diff` with a snapshot: `{ data: { hash, diff: { collections, fields, systemFields, relations } } }`, each entry naming what it changes and listing deep-diff changes (`N`, `D`, `E`, `A`); 204 when there are none. Fields and relations of deleted collections aren't listed. A snapshot of another Directus version or database is refused unless `?force=true`. The snapshot is checked as a whole first and put in the form this server would give it, so only meaningful differences show up: from Postgres, `data_type`, constraint names and `nextval(…)` defaults are dropped, and properties Cirrus doesn't know are ignored, as everywhere in the API.
+- `POST /schema/apply` with `{ hash, diff }`: refused (`INVALID_PAYLOAD`) when the hash isn't the current schema's, which means the schema changed since the diff. The diff is applied to the current snapshot, the result is checked as a whole, and the DDL and metadata writes that turn the schema into it run in one batch (ADR-030): a schema is applied entirely or not at all. Changes to existing data fail as the API's would (`CONTAINS_NULL_VALUES`, `INVALID_FOREIGN_KEY`, …) and leave everything as it was.
+- What a snapshot can't do, as through the API: turn a folder into a table or back, give an alias field a column, change a primary key, change system collections (their fields, relations and `systemFields` are fixed), or describe many-to-any relations. Collections and fields can't be renamed: a new name is a deletion and a creation.
 
 ---
 
@@ -473,7 +482,7 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | **M5 – Files** ✅ | Uploads streamed into R2, folders, assets (Range, cache headers), image transformations (Images binding) | A post can have a cover image |
 | **M6 – Admin UI MVP** ✅ | Data model + Content + Files, served by the Worker; `session` auth mode | `posts` can be managed entirely through the UI |
 | **M7 – Users & access** ✅ | User directory, roles, policies and permissions in the admin | An editor can be given access, limited to their own items, entirely through the UI |
-| **M8+** | Flows (Queues), realtime (DO), cache, schema snapshot, SDK | — |
+| **M8+** | Flows (Queues), realtime (DO), cache, SDK; schema snapshots are done (§7.5) | — |
 
 ---
 
@@ -532,6 +541,7 @@ Tracked as [GitHub milestones](https://github.com/1112145/cirrus/milestones).
 | ADR-027 | `session` mode (the admin app's login) follows Directus: the access token, naming its session in a `session` claim, is an httpOnly cookie, and requests with it check that the session is still open (one indexed D1 read), so logout ends it at once. Unlike Directus, refreshing extends the session without rotating its token: the token never leaves the httpOnly cookie, and rotating without Directus' grace period (ADR-017) would log out every tab but one when several refresh at once. The cookie authenticates only requests without a token, and writes only when `Origin` is absent or this origin (against cross-site requests SameSite lets through); a cookie that doesn't check out is ignored rather than failing every request, logins included | ✅ Accepted |
 | ADR-028 | The admin app is Vue 3 + vue-router + `@directus/sdk` with its own small components and CSS, no UI kit (about 75 KB of gzipped JS and CSS), and uses the API only as an SDK client would, so it exercises the compatibility Cirrus promises. Workers Static Assets serve it under `/admin` with `run_worker_first: ["/*", "!/admin/*"]`: same origin as the API (no CORS, the session cookie just works), and its files never invoke the Worker. Data model changes are plans of API calls, undone newest first when a step fails, since the API has no transactions across requests | ✅ Accepted |
 | ADR-029 | Login rate limits are counters in D1 (`cirrus_login_attempts`), not the Workers rate limiting binding or a Durable Object: the binding counts per Cloudflare location and only in 10 or 60 second periods, and a Durable Object is one more thing to deploy for a small table. A login adds one attempt to each of its counters (IP and email, IP, email) in one batch before the password is checked; D1 runs batches one at a time, so concurrent guesses can't get past the limit. A successful login gives the attempts back, so the counts are failed logins. Fixed windows: expired rows are deleted by the next login. Directus' own `RATE_LIMITER_*` (every request, per IP) and the lockout setting (`auth_login_attempts`, which suspends the user) aren't followed: the first is a different feature, and the second lets anyone suspend an account | ✅ Accepted |
+| ADR-030 | `POST /schema/apply` is declarative, not a replay of the diff's entries as Directus' is: the diff is applied to the current snapshot, the result is checked as a whole, and one batch writes the difference. D1 has no transactions across batches, so replaying entries through the services (one batch each) would leave a schema half applied when a later step fails, and a dropped column can't be undone. One batch needs no intermediate schemas: tables are dropped, created or changed by the migration planner, and metadata is written in one statement per table (rows as JSON, read with `json_each()`), so a large schema stays within D1's statements per invocation. Relations that change are deleted and inserted again with their ids, and new collections are grouped once they all exist, so no unique key or foreign key of the system tables clashes midway. The hash is a SHA-256 of the snapshot's collections, fields and relations | ✅ Accepted |
 
 ---
 
@@ -543,7 +553,7 @@ Goal: a client written as `createDirectus(url).with(rest()).with(authentication(
 
 | Area | Requirement |
 |---|---|
-| Paths | Unchanged: `/items/:collection`, `/collections`, `/fields/:collection`, `/relations`, `/files`, `/folders`, `/assets/:id`, `/users`, `/users/me`, `/roles`, `/policies`, `/permissions`, `/permissions/me`, `/auth/*`, `/server/info`, `/server/ping`, `/server/health` |
+| Paths | Unchanged: `/items/:collection`, `/collections`, `/fields/:collection`, `/relations`, `/files`, `/folders`, `/assets/:id`, `/users`, `/users/me`, `/roles`, `/policies`, `/permissions`, `/permissions/me`, `/auth/*`, `/schema/snapshot`, `/schema/diff`, `/schema/apply`, `/server/info`, `/server/ping`, `/server/health` |
 | Query params | Accept both JSON strings (`filter={…}`) and bracket syntax (`filter[status][_eq]=x`); `fields` and `sort` as comma-separated lists or arrays; minimal `deep` and `alias` support |
 | Responses | Wrapped in `{ "data": … }`, with `meta` when requested |
 | Errors | `{ "errors": [{ "message", "extensions": { "code" } }] }` using Directus codes (`FORBIDDEN`, `INVALID_CREDENTIALS`, `INVALID_PAYLOAD`, `RECORD_NOT_UNIQUE`, `TOKEN_EXPIRED`, …) and matching HTTP statuses |

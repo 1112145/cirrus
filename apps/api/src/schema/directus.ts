@@ -19,7 +19,7 @@ import {
   metaDefaults,
   parseMeta,
 } from './meta.ts';
-import type { CollectionRecord, FieldRecord, NewField } from './store.ts';
+import { anyCollection, type CollectionRecord, type FieldRecord, m2oOf, type NewField, type Schema } from './store.ts';
 
 /**
  * Mapping between Directus payloads ({ collection, meta, schema } / { field, type, meta, schema })
@@ -187,4 +187,11 @@ export function toDirectusField(f: FieldRecord, foreignKey: { table: string; col
       comment: null,
     },
   };
+}
+
+/** A field in the Directus shape, with the foreign key of its relation, if Cirrus enforces one. */
+export function directusField(schema: Schema, f: FieldRecord) {
+  const r = m2oOf(schema, f.collection, f.field);
+  const pk = r && r.onDelete !== null ? anyCollection(schema, r.related)?.fields.find((x) => x.column?.primaryKey) : null;
+  return toDirectusField(f, pk ? { table: r!.related, column: pk.field } : null);
 }

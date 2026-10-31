@@ -8,6 +8,7 @@ import { fields } from './routes/fields.ts';
 import { assets, files, folders } from './routes/files.ts';
 import { items } from './routes/items.ts';
 import { relations } from './routes/relations.ts';
+import { schema } from './routes/schema.ts';
 import { server } from './routes/server.ts';
 import { access, permissions, policies, roles, users } from './routes/system.ts';
 
@@ -20,6 +21,7 @@ app.route('/auth', auth);
 app.route('/collections', collections);
 app.route('/fields', fields);
 app.route('/relations', relations);
+app.route('/schema', schema);
 app.route('/items', items);
 app.route('/users', users);
 app.route('/roles', roles);

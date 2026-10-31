@@ -3,7 +3,7 @@
 A Directus-style headless CMS that runs entirely on Cloudflare (Workers + Hono, D1, R2, KV, Durable Objects, Queues).
 Its REST API is compatible with `@directus/sdk` 21.3.0 (Directus 11.17.4). See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design.
 
-> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging), M3 (auth: login, roles, policies, permissions down to rows and fields), M4 (relations: M2O, O2M, M2M, nested fields, relational filters, `deep`, nested writes, `on_delete`), M5 (files: uploads streamed into R2, folders, assets with Range, cache headers and image transformations), M6 (the admin app: data model, content and file library in the browser) and M7 (users, roles, policies and permissions in the admin) are done; see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
+> **Status:** early development. M0 (scaffold), M1 (schema: collections and fields), M2 (items: CRUD with filter, sort, fields, search and paging), M3 (auth: login, roles, policies, permissions down to rows and fields), M4 (relations: M2O, O2M, M2M, nested fields, relational filters, `deep`, nested writes, `on_delete`), M5 (files: uploads streamed into R2, folders, assets with Range, cache headers and image transformations), M6 (the admin app: data model, content and file library in the browser) and M7 (users, roles, policies and permissions in the admin) are done, and so are schema snapshots (`/schema/snapshot`, `/schema/diff`, `/schema/apply`); see the [milestones](https://github.com/1112145/cirrus/milestones) for the roadmap.
 
 ## Layout
 
@@ -131,6 +131,17 @@ Non-admins need permissions: create a policy with `/policies` and `/permissions`
 `{ "author": { "_eq": "$CURRENT_USER" } }`, allowed fields, validation, presets), attach it to a role or a user
 (`/roles` with `policies: [{ "policy": "<id>" }]`, or `/access`), and give users that role. Requests without a
 token get the public policy, which starts with no permissions.
+
+Version the schema in git and move it between projects with schema snapshots, as in Directus (admin token;
+the diff is applied in one batch, so entirely or not at all):
+
+```bash
+curl 'http://localhost:8787/schema/snapshot?export=json' -H "Authorization: Bearer $TOKEN" -o schema.json
+# on the other project: what would change, then apply it
+curl -X POST "$TARGET/schema/diff" -H "Authorization: Bearer $TARGET_TOKEN" -H 'Content-Type: application/json' \
+  -d @schema.json | jq '.data' > diff.json
+curl -X POST "$TARGET/schema/apply" -H "Authorization: Bearer $TARGET_TOKEN" -H 'Content-Type: application/json' -d @diff.json
+```
 
 ## First deploy
 
