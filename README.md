@@ -25,7 +25,7 @@ apps/api/            Hono Worker
   src/middleware/    authentication (tokens), JSON body, Directus error format
   migrations/        D1 migrations for the system tables (cirrus_*)
   test/              tests running inside workerd; test/contract/ uses the real @directus/sdk
-  wrangler.jsonc
+  wrangler.example.jsonc  template for wrangler.jsonc (git-ignored: your copy, with your resource IDs)
 packages/shared/     Directus-style error codes, UUIDv7, PBKDF2 hashing, JWT, tokens, IP ranges
 packages/schema/     field types → SQLite, value codecs, DDL generator, migration planner (pure)
 packages/query/      Directus query parsing, filter → SQL compiler with permissions and relations, nested reads, item statements, payload validation (pure)
@@ -136,7 +136,7 @@ token get the public policy, which starts with no permissions.
 
 ```bash
 cd apps/api
-npx wrangler d1 create cirrus          # copy the database_id into wrangler.jsonc
+npx wrangler d1 create cirrus          # copy the database_id into wrangler.jsonc (made from wrangler.example.jsonc)
 npx wrangler r2 bucket create cirrus-files
 pnpm db:migrate:remote
 npx wrangler secret put SECRET         # a long random string; it signs access tokens
@@ -144,12 +144,17 @@ npx wrangler secret put ADMIN_TOKEN    # optional: another long random string, t
 pnpm run deploy                        # builds the admin app, then deploys the Worker with it
 ```
 
+`wrangler.jsonc` is git-ignored: it is your copy of `wrangler.example.jsonc`, created by `pnpm dev`,
+`pnpm db:migrate:*` or `pnpm run deploy` when missing, and holds your own resource IDs. `deploy` and
+`db:migrate:remote` refuse to run while it still has the template's placeholder `database_id`. Tests and the
+e2e suite read `wrangler.example.jsonc`, so change bindings and vars in both.
+
 The admin app is then at `https://<your worker>/admin`. Its session cookie is `Secure`: serve it over HTTPS (as
 workers.dev and custom domains are), or set `SESSION_COOKIE_SECURE` to `false` for plain HTTP.
 
 Asset transformations use [Cloudflare Images](https://developers.cloudflare.com/images/transform-images/bindings/)
 through the `IMAGES` binding (billed per transformation beyond the free allowance; each variant is made once and kept
-in R2). Remove the binding from `wrangler.jsonc` to turn them off.
+in R2). Remove the binding from `wrangler.jsonc` (and the template, for tests) to turn them off.
 
 ## Conventions
 
@@ -172,7 +177,7 @@ in R2). Remove the binding from `wrangler.jsonc` to turn them off.
 - The admin app talks to the API only through `@directus/sdk` (`request()` in `apps/admin/src/api.ts`), like any
   client; lists read `meta.filter_count` with `readPage()`, as the SDK drops `meta`. Data model changes are plans of
   API calls (`apps/admin/src/lib/builder.ts`), tested against the Worker in `apps/api/test/admin-plans.test.ts`.
-- `compatibility_date` in `wrangler.jsonc` must not exceed the date supported by the workerd bundled with `@cloudflare/vitest-plugin`.
+- `compatibility_date` in `wrangler.example.jsonc` (and your `wrangler.jsonc`) must not exceed the date supported by the workerd bundled with `@cloudflare/vitest-plugin`.
 
 ## Roadmap
 

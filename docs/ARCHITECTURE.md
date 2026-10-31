@@ -76,7 +76,7 @@ cirrus/
 │  ├─ api/            # Hono Worker: routes, services, middleware
 │  │  ├─ migrations/  # D1 migrations for the system tables
 │  │  ├─ test/        # tests run inside workerd; test/contract/ uses the real @directus/sdk
-│  │  └─ wrangler.jsonc
+│  │  └─ wrangler.example.jsonc  # template; wrangler.jsonc is each operator's git-ignored copy
 │  └─ admin/          # Vue 3 (Vite) SPA, served by the Worker under /admin — M6
 └─ packages/
    ├─ shared/         # Directus error codes, UUIDv7, types, zod schemas, filter DSL types
@@ -86,7 +86,9 @@ cirrus/
    └─ sdk/            # TypeScript client SDK — M8+
 ```
 
-`wrangler.jsonc` and `migrations/` live in `apps/api` so the Worker is self-contained. A package is only created once the milestone that needs it starts.
+The Wrangler config and `migrations/` live in `apps/api` so the Worker is self-contained. Only the template
+`wrangler.example.jsonc` is committed, with placeholder IDs; tests and the e2e suite read it, and the `dev`,
+`db:migrate:*` and `deploy` scripts copy it to the git-ignored `wrangler.jsonc` when missing. A package is only created once the milestone that needs it starts.
 
 Tooling: pnpm 10 workspaces, TypeScript 5.9, Vitest 4 + `@cloudflare/vitest-plugin` (the new name of `vitest-pool-workers`), Wrangler 4. `compatibility_date` must not exceed the date supported by the plugin's bundled workerd.
 
@@ -422,7 +424,9 @@ GET    /assets/:id[/:filename]   the contents (and HEAD), possibly transformed
 
 Implemented in M6: `apps/admin`, a Vue 3 SPA (Vite, vue-router, `@directus/sdk`) with its own small components and styles (light and dark), in English. It uses the API exactly as any SDK client would (ADR-028).
 
-**Serving.** Workers Static Assets serve the build (`apps/admin/dist`) under `/admin`, with the SPA fallback; `run_worker_first: ["/*", "!/admin/*"]` sends every other path to the Worker, so the app's files never invoke it. `/` and `/admin` redirect to `/admin/`. `pnpm dev` and `pnpm run deploy` build the app first (`wrangler dev` refuses a missing assets directory); `pnpm dev:admin` runs Vite with hot reload on `/admin/`, proxying the API paths to `wrangler dev` with the Worker's `Origin`, so session-cookie writes pass the same-origin check.
+**Serving.** Workers Static Assets serve the build under `/admin`, with the SPA fallback: Vite writes it to
+`apps/admin/dist/admin/` and copies `index.html` to `dist/` for the fallback, rather than using
+`assets.base_path`, which Cloudflare does not enable on every account; `run_worker_first: ["/*", "!/admin/*"]` sends every other path to the Worker, so the app's files never invoke it. `/` and `/admin` redirect to `/admin/`. `pnpm dev` and `pnpm run deploy` build the app first (`wrangler dev` refuses a missing assets directory); `pnpm dev:admin` runs Vite with hot reload on `/admin/`, proxying the API paths to `wrangler dev` with the Worker's `Origin`, so session-cookie writes pass the same-origin check.
 
 **Session.** The app logs in in `session` mode (§10): it never holds a token, and `<img src="/assets/…">` is authenticated by the cookie. At start it tries one `refresh()` to pick up an earlier session; the SDK then refreshes before the token expires. A request failing with `INVALID_CREDENTIALS`, `TOKEN_EXPIRED` or `INVALID_TOKEN` leads back to the login, which returns to the page afterwards. Users need app access (`/policies/me/globals`); the settings module (data model, roles, policies) is for admins.
 

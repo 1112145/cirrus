@@ -6,3 +6,5 @@ dist/
 coverage/
 playwright-report/
 test-results/
+# Your own copy of apps/api/wrangler.example.jsonc, with your resource IDs
+apps/api/wrangler.jsonc

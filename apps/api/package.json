@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm --filter @cirrus/admin build && wrangler dev",
-    "deploy": "pnpm --filter @cirrus/admin build && wrangler deploy",
-    "db:migrate:local": "wrangler d1 migrations apply DB --local",
-    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "dev": "node scripts/wrangler-config.mjs && pnpm --filter @cirrus/admin build && wrangler dev",
+    "deploy": "node scripts/wrangler-config.mjs --remote && pnpm --filter @cirrus/admin build && wrangler deploy",
+    "db:migrate:local": "node scripts/wrangler-config.mjs && wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "node scripts/wrangler-config.mjs --remote && wrangler d1 migrations apply DB --remote",
+    "cf-typegen": "node scripts/wrangler-config.mjs && wrangler types --env-interface CloudflareBindings",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json"
   },

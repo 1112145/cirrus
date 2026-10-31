@@ -1,3 +1,6 @@
+// Template for wrangler.jsonc. Copy it (`pnpm dev`, `pnpm db:migrate:*` and `pnpm run deploy` do so when
+// wrangler.jsonc is missing) and put your own resource IDs in the copy: wrangler.jsonc is git-ignored.
+// Tests and the e2e suite read this file, so keep it a working local config with placeholder IDs.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "cirrus-api",
@@ -36,7 +39,7 @@
     "ASSETS_TRANSFORM_IMAGE_MAX_DIMENSION": "6000"
   },
 
-  // database_id: replace with the real ID after running `wrangler d1 create cirrus`
+  // database_id: in wrangler.jsonc, replace with the real ID after running `wrangler d1 create cirrus`
   "d1_databases": [
     {
       "binding": "DB",
@@ -52,10 +55,10 @@
   // Cloudflare Images, for asset transformations (`/assets/:id?width=…`). Remove it to turn them off.
   "images": { "binding": "IMAGES" },
 
+  // The admin app builds into ../admin/dist/admin/, so its files are already under /admin/.
   "assets": {
     "directory": "../admin/dist",
     "binding": "ASSETS",
-    "base_path": "/admin",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/*", "!/admin/*"]
   }
