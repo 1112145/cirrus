@@ -9,11 +9,13 @@ import { fileURLToPath } from 'node:url';
 const api = fileURLToPath(new URL('../../api', import.meta.url));
 const state = mkdtempSync(join(tmpdir(), 'cirrus-e2e-'));
 const env = { ...process.env, CI: 'true', WRANGLER_SEND_METRICS: 'false' };
+// The template, not the operator's git-ignored wrangler.jsonc: the suite runs the same everywhere, CI included.
+const config = ['--config', 'wrangler.example.jsonc'];
 
-execFileSync('pnpm', ['exec', 'wrangler', 'd1', 'migrations', 'apply', 'DB', '--local', '--persist-to', state], { cwd: api, env, stdio: 'inherit' });
+execFileSync('pnpm', ['exec', 'wrangler', 'd1', 'migrations', 'apply', 'DB', '--local', '--persist-to', state, ...config], { cwd: api, env, stdio: 'inherit' });
 
 const vars = { SECRET: 'e2e-secret', ADMIN_TOKEN: process.env.E2E_ADMIN_TOKEN ?? 'e2e-admin-token' };
-const args = ['exec', 'wrangler', 'dev', '--port', process.env.E2E_PORT ?? '8788', '--persist-to', state, '--show-interactive-dev-session=false'];
+const args = ['exec', 'wrangler', 'dev', '--port', process.env.E2E_PORT ?? '8788', '--persist-to', state, '--show-interactive-dev-session=false', ...config];
 for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}:${v}`);
 
 const child = spawn('pnpm', args, { cwd: api, env, stdio: 'inherit' });

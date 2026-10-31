@@ -10,7 +10,8 @@ export default defineConfig(async () => {
     plugins: [
       cloudflareTest({
         main: './src/index.ts',
-        wrangler: { configPath: './wrangler.jsonc' },
+        // The template: wrangler.jsonc is the operator's own, git-ignored copy and may not exist (CI).
+        wrangler: { configPath: './wrangler.example.jsonc' },
         miniflare: {
           outboundService: outbound,
           bindings: { TEST_MIGRATIONS: migrations, ADMIN_TOKEN: 'test-admin-token', SECRET: 'test-secret' },
