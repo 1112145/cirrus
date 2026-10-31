@@ -4,6 +4,7 @@ import {
   base64UrlEncode,
   CirrusError,
   CirrusErrors,
+  clientNetwork,
   decodeJwt,
   ipInNetworks,
   isIpNetwork,
@@ -126,6 +127,18 @@ describe('IP networks', () => {
     for (const bad of ['', '1.2.3', '1.2.3.4.5', '256.1.1.1', '01.2.3.4', '1.2.3.4/33', '::1/129', '1::2::3', 'g::1', '1.2.3.4/']) {
       expect(isIpNetwork(bad)).toBe(false);
     }
+  });
+
+  it.each([
+    ['203.0.113.7', '203.0.113.7'],
+    ['::ffff:203.0.113.7', '203.0.113.7'],
+    ['2001:db8:a:b:1:2:3:4', '2001:db8:a:b::/64'],
+    ['2001:DB8:a:b::ffff', '2001:db8:a:b::/64'],
+    ['2001:db8::1', '2001:db8:0:0::/64'],
+    ['::1', '0:0:0:0::/64'],
+    ['not an ip', null],
+  ])('counts %s as %s', (ip, expected) => {
+    expect(clientNetwork(ip)).toBe(expected);
   });
 });
 

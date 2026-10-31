@@ -33,6 +33,14 @@ export type Bindings = {
   SESSION_COOKIE_SAME_SITE?: string;
   /** Domain of the session cookie (Directus SESSION_COOKIE_DOMAIN). */
   SESSION_COOKIE_DOMAIN?: string;
+  /** Window of the login rate limits, e.g. "15m" (ADR-029). Default 15 minutes. */
+  LOGIN_RATE_LIMIT_DURATION?: string;
+  /** Failed logins per window from one client IP for one email; 0 = no limit. Default 10. */
+  LOGIN_RATE_LIMIT_IP_EMAIL?: string;
+  /** Failed logins per window from one client IP, whatever the email; 0 = no limit. Default 30. */
+  LOGIN_RATE_LIMIT_IP?: string;
+  /** Failed logins per window for one email, from anywhere; 0 = no limit. Default 100. */
+  LOGIN_RATE_LIMIT_EMAIL?: string;
   /** Items returned when a request sets no limit (Directus QUERY_LIMIT_DEFAULT). Default 100. */
   QUERY_LIMIT_DEFAULT?: string;
   /** Largest limit a request may ask for; -1 = none (Directus QUERY_LIMIT_MAX). With a maximum, limit=-1 returns that many. */
