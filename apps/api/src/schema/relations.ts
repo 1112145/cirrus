@@ -41,7 +41,7 @@ function text(v: unknown, path: string): string | null | undefined {
   return v;
 }
 
-function parseRelation(body: unknown): Input {
+export function parseRelation(body: unknown): Input {
   if (!isPlainObject(body)) throw invalidPayload('A relation must be an object');
   const meta = body.meta ?? {};
   if (!isPlainObject(meta)) throw invalidPayload('"meta" must be an object or null');
@@ -76,7 +76,7 @@ function parseRelation(body: unknown): Input {
 }
 
 /** Collections a relation may point at: user collections with items, and the system ones whose deletes apply on_delete. */
-function relatedCollection(schema: Schema, name: string): CollectionRecord {
+export function relatedCollection(schema: Schema, name: string): CollectionRecord {
   const c = schema.collections.get(name) ?? (RELATED_SYSTEM_COLLECTIONS.includes(name) ? SYSTEM_COLLECTIONS.get(name) : undefined);
   if (!c || c.folder) throw invalidPayload(`Collection "${name}" doesn't exist`);
   return c;
@@ -89,7 +89,7 @@ const isInteger = (t: FieldType) => t === 'integer' || t === 'bigInteger';
 /** Keys are compared as stored: the field must store them like the related primary key. */
 export const keyTypesMatch = (fk: FieldType, pk: FieldType) => fk === pk || (isInteger(fk) && isInteger(pk));
 
-function assertKeyType(f: FieldRecord, type: FieldType, related: CollectionRecord) {
+export function assertKeyType(f: FieldRecord, type: FieldType, related: CollectionRecord) {
   const pk = primaryOf(related);
   if (!keyTypesMatch(type, pk.type)) {
     throw invalidPayload(`Field "${f.field}" of type "${type}" can't hold keys of collection "${related.collection}", which are of type "${pk.type}"`);
@@ -97,7 +97,7 @@ function assertKeyType(f: FieldRecord, type: FieldType, related: CollectionRecor
 }
 
 /** The fields a relation names must exist, and an O2M alias can list the items of one relation only. */
-function assertMeta(schema: Schema, r: RelationRecord) {
+export function assertMeta(schema: Schema, r: RelationRecord) {
   const many = schema.collections.get(r.collection)!;
   const column = (name: string, what: string) => {
     const f = many.fields.find((x) => x.field === name);
@@ -125,7 +125,7 @@ function assertMeta(schema: Schema, r: RelationRecord) {
  * Fails the batch (INVALID_FOREIGN_KEY) when existing values of the field reference no item: what
  * adding a foreign key to a column with data would do.
  */
-function danglingGuard(db: D1Database, r: RelationRecord, schema: Schema): D1PreparedStatement {
+export function danglingGuard(db: D1Database, r: RelationRecord, schema: Schema): D1PreparedStatement {
   const related = anyCollection(schema, r.related)!;
   const table = SYSTEM_COLLECTIONS.get(r.related)?.table ?? r.related;
   const fk = quoteIdent(r.field);
@@ -135,7 +135,7 @@ function danglingGuard(db: D1Database, r: RelationRecord, schema: Schema): D1Pre
   );
 }
 
-const relationColumns = (r: RelationRecord) =>
+export const relationColumns = (r: RelationRecord) =>
   [
     ['many_collection', r.collection],
     ['many_field', r.field],

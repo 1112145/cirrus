@@ -225,7 +225,7 @@ export function updateCollection(db: D1Database, name: string, meta: CollectionM
     .bind(...cols.map(([, v]) => v), name);
 }
 
-function fieldColumns(f: NewField) {
+export function fieldColumns(f: NewField) {
   const col = f.column;
   const props: MetaOf<typeof COLUMN_INPUT> = {
     is_primary_key: col?.primaryKey ?? false,

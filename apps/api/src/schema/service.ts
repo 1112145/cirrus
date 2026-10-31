@@ -132,7 +132,7 @@ export async function deleteCollection(db: D1Database, name: string): Promise<vo
   );
 }
 
-function assertGroup(schema: Schema, collection: string, group: string | null, pending: string[] = []) {
+export function assertGroup(schema: Pick<Schema, 'collections'>, collection: string, group: string | null, pending: string[] = []) {
   if (group === null) return;
   if (group === collection) throw invalidPayload("A collection can't be grouped under itself");
   if (!schema.collections.has(group) && !pending.includes(group)) {

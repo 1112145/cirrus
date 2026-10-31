@@ -1,3 +1,4 @@
+export * from './diff.ts';
 export * from './errors.ts';
 export * from './hash.ts';
 export * from './ip.ts';

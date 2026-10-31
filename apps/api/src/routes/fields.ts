@@ -4,21 +4,14 @@ import { readableFields } from '../access/visibility.ts';
 import type { AppEnv } from '../env.ts';
 import { requireAdmin } from '../middleware/auth.ts';
 import { readJson } from '../middleware/body.ts';
-import { toDirectusField } from '../schema/directus.ts';
+import { directusField } from '../schema/directus.ts';
 import { isPlainObject } from '../schema/meta.ts';
 import { createField, deleteField, updateFields } from '../schema/service.ts';
 import { requestContext } from '../request.ts';
-import { anyCollection, type CollectionRecord, type FieldRecord, getCollection, getField, getSchema, m2oOf, type Schema } from '../schema/store.ts';
+import { type CollectionRecord, getCollection, getField, getSchema } from '../schema/store.ts';
 
 /** SDK: readFields, readFieldsByCollection, readField, createField, updateField, updateFields, deleteField */
 export const fields = new Hono<AppEnv>();
-
-/** A field in the Directus shape, with the foreign key of its relation, if Cirrus enforces one. */
-function directusField(schema: Schema, f: FieldRecord) {
-  const r = m2oOf(schema, f.collection, f.field);
-  const pk = r && r.onDelete !== null ? anyCollection(schema, r.related)?.fields.find((x) => x.column?.primaryKey) : null;
-  return toDirectusField(f, pk ? { table: r!.related, column: pk.field } : null);
-}
 
 const read = async (db: D1Database, collection: string, names: string[]) => {
   const schema = await getSchema(db);
